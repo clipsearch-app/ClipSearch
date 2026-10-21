@@ -1,0 +1,151 @@
+name: build-exe
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - clip_search.py
+      - .github/workflows/build-exe.yml
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install PyInstaller
+        run: python -m pip install --quiet pyinstaller
+
+      - name: Check the program starts
+        run: python clip_search.py --selftest
+
+      - name: Write the window and installer sources
+        run: |
+          python clip_search.py --write-host host
+          python clip_search.py --write-installer installer
+          python clip_search.py --notes notes.md
+          $ver = python clip_search.py --version
+          "APP_VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Output "Version: $ver"
+
+      - name: Build the engine (clip_backend.exe)
+        run: |
+          python -m PyInstaller --noconfirm --clean --onefile --noconsole --icon host/clip_search.ico --name clip_backend clip_search.py
+          New-Item -ItemType Directory -Force app/resources | Out-Null
+          Copy-Item dist/clip_backend.exe app/resources/clip_backend.exe
+
+      - name: Get ffmpeg (for trimming clips)
+        run: |
+          $gz = Join-Path $env:RUNNER_TEMP "ffmpeg.gz"
+          Invoke-WebRequest -Uri "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-win32-x64.gz" -OutFile $gz
+          $in = [System.IO.File]::OpenRead($gz)
+          $out = [System.IO.File]::Create((Join-Path $PWD "app/resources/ffmpeg.exe"))
+          $z = New-Object System.IO.Compression.GZipStream($in, [System.IO.Compression.CompressionMode]::Decompress)
+          $z.CopyTo($out); $z.Close(); $out.Close(); $in.Close()
+          $ver = & app/resources/ffmpeg.exe -hide_banner -version
+          if ($LASTEXITCODE -ne 0) { throw "ffmpeg does not start" }
+          Write-Output $ver[0]
+          $global:LASTEXITCODE = 0
+
+      - name: Build the window (ClipSearch.exe, WebView2)
+        run: |
+          $log = dotnet build host/ClipSearch.csproj -c Release -o host/out --nologo "-p:Version=$env:APP_VERSION" 2>&1
+          $code = $LASTEXITCODE
+          $log | Select-String -Pattern "error CS|error MSB|error NU|: error " | Select-Object -First 20 | ForEach-Object { Write-Output ("::error::" + $_.Line.Trim()) }
+          $log | Select-Object -Last 12
+          if ($code -ne 0) { throw "window build failed" }
+          Copy-Item host/out/ClipSearch.exe app/ClipSearch.exe
+          if (Test-Path host/out/ClipSearch.exe.config) { Copy-Item host/out/ClipSearch.exe.config app/ }
+          Write-Output ("Window exe: {0:N0} KB" -f ((Get-Item app/ClipSearch.exe).Length / 1KB))
+          $global:LASTEXITCODE = 0
+
+      - name: Check the window opens
+        continue-on-error: true
+        run: |
+          $log = Join-Path $env:TEMP "clipsearch-smoke.txt"
+          Remove-Item $log -ErrorAction SilentlyContinue
+          $p = Start-Process -FilePath (Join-Path $PWD "app/ClipSearch.exe") -ArgumentList "--smoke" -PassThru
+          if (-not $p.WaitForExit(90000)) { $p.Kill() }
+          $text = if (Test-Path $log) { (Get-Content $log) -join " / " } else { "no smoke log" }
+          $wl = Join-Path $env:LOCALAPPDATA "ClipSearch\window-log.txt"
+          if (Test-Path $wl) { Get-Content $wl -Tail 15 }
+          if ($text -match "SMOKE OK") { Write-Output "::notice::Window check: $text" } else { Write-Output "::warning::Window check: $text"; throw "window check failed" }
+
+      - name: Pack the app into a zip (the installer downloads it)
+        run: |
+          7z a -tzip -mx=9 ClipSearch-win32-x64.zip ./app/*
+          if ($LASTEXITCODE -ne 0) { throw "zip failed" }
+          $mb = "{0:N1}" -f ((Get-Item ClipSearch-win32-x64.zip).Length / 1MB)
+          Write-Output "::notice::App zip: $mb MB"
+
+      - name: Build the installer (ClipSearchSetup.exe)
+        run: |
+          $log = dotnet build installer/ClipSearchSetup.csproj -c Release -o installer/out --nologo "-p:Version=$env:APP_VERSION" 2>&1
+          $code = $LASTEXITCODE
+          $log | Select-String -Pattern "error CS|error MSB|error NU|: error " | Select-Object -First 20 | ForEach-Object { Write-Output ("::error::" + $_.Line.Trim()) }
+          $log | Select-Object -Last 12
+          if ($code -ne 0) { throw "installer build failed" }
+          New-Item -ItemType Directory -Force setup | Out-Null
+          Copy-Item installer/out/ClipSearchSetup.exe setup/ClipSearchSetup.exe
+          $kb = "{0:N0}" -f ((Get-Item setup/ClipSearchSetup.exe).Length / 1KB)
+          Write-Output "::notice::Installer: $kb KB"
+          $global:LASTEXITCODE = 0
+
+      - name: Check the installer installs the app
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "cs-install-test\ClipSearch"
+          $zip = Join-Path $PWD "ClipSearch-win32-x64.zip"
+          $p = Start-Process -FilePath setup/ClipSearchSetup.exe -ArgumentList @("--silent", "--dir", "`"$dir`"", "--zip", "`"$zip`"", "--no-shortcuts", "--no-register") -PassThru -Wait
+          $logf = Join-Path $env:TEMP "ClipSearchSetup.log"
+          if (Test-Path $logf) { Get-Content $logf -Tail 20 }
+          if ($p.ExitCode -ne 0) { Write-Output "::error::installer exit code $($p.ExitCode)"; throw "installer exit code $($p.ExitCode)" }
+          foreach ($f in @("ClipSearch.exe", "Uninstall.exe", "resources\clip_backend.exe", "resources\ffmpeg.exe")) {
+            if (-not (Test-Path (Join-Path $dir $f))) { Write-Output "::error::$f was not installed"; throw "$f was not installed" }
+          }
+          Write-Output "::notice::Installer works"
+
+      - name: Check the installer window opens
+        continue-on-error: true
+        run: |
+          $p = Start-Process -FilePath setup/ClipSearchSetup.exe -ArgumentList "--selftest-ui" -PassThru
+          if (-not $p.WaitForExit(90000)) { $p.Kill(); Write-Output "::warning::installer window check timed out"; throw "timeout" }
+          if ($p.ExitCode -ne 0) { Write-Output "::warning::installer window exit code $($p.ExitCode)"; throw "exit $($p.ExitCode)" }
+          Write-Output "::notice::Installer window opens"
+
+      - name: Publish to GitHub Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "v$env:APP_VERSION"
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --title "ClipSearch $env:APP_VERSION" --notes-file notes.md --latest
+            if ($LASTEXITCODE -ne 0) { throw "release create failed" }
+          } else {
+            gh release edit $tag --notes-file notes.md --latest
+          }
+          gh release upload $tag ClipSearch-win32-x64.zip setup/ClipSearchSetup.exe --clobber
+          if ($LASTEXITCODE -ne 0) { throw "release upload failed" }
+          $global:LASTEXITCODE = 0
+          Write-Output "::notice::Published $tag"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ClipSearchSetup
+          path: setup/ClipSearchSetup.exe
+          retention-days: 30
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ClipSearch
+          path: app
+          retention-days: 30
