@@ -52,6 +52,50 @@ GITHUB_API = os.environ.get("CLIPS_GITHUB_API", "https://api.github.com")
 WORKER_URL = os.environ.get("CLIPS_WORKER_URL", "https://clipsearch-api.clipsearch-app.workers.dev").rstrip("/")
 API_BASE = os.environ.get("CLIPS_API_BASE", WORKER_URL + "/helix")
 HEALTH_URL = (API_BASE[: -len("/helix")] if API_BASE.endswith("/helix") else API_BASE) + "/health"
+REPORT_URL = os.environ.get("CLIPS_REPORT_URL", WORKER_URL + "/report")
+
+
+def scrub_paths(text):
+    text = re.sub(r"([A-Za-z]:\\Users\\)[^\\\r\n\"']+", lambda m: m.group(1) + "…", text, flags=re.I)
+    return re.sub(r"(/home/|/Users/)[^/\r\n\"']+", lambda m: m.group(1) + "…", text)
+
+
+def report_log(limit=12000):
+    try:
+        with open(os.path.join(data_dir(), "log.txt"), "r", encoding="utf-8", errors="replace") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - limit * 2))
+            return scrub_paths(f.read()[-limit:])
+    except Exception:
+        return ""
+
+
+def os_name():
+    try:
+        import platform
+        return f"{platform.system()} {platform.release()} ({platform.version()})"
+    except Exception:
+        return sys.platform
+
+
+def send_report(text, contact, with_log):
+    body = {"text": str(text or "")[:2000], "contact": str(contact or "")[:200],
+            "log": report_log() if with_log else "",
+            "meta": {"version": VERSION, "lang": LANG["code"], "os": os_name()}}
+    req = urllib.request.Request(REPORT_URL, data=json.dumps(body).encode(), method="POST", headers={
+        "X-ClipSearch": VERSION, "User-Agent": "ClipSearch/" + VERSION, "Content-Type": "application/json", "Accept-Language": LANG["code"]})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as e:
+        try:
+            msg = json.load(e).get("message")
+        except Exception:
+            msg = ""
+        raise ValueError(msg or L(f"Сервер ответил {e.code}.", f"The server responded {e.code}."))
+    except Exception:
+        raise ValueError(L("Нет связи с сервером ClipSearch. Проверьте интернет.", "No connection to the ClipSearch server. Check your internet connection."))
 GQL_URL = os.environ.get("CLIPS_GQL_URL", "https://gql.twitch.tv/gql")
 GQL_HASH = "36b89d2507fce29e5ca551df756d27c1cfe079e2609642b4390aa4c35796eb11"
 GQL_CLIENT_ID = "kimne78kx3ncx6brgo4mv6wki5h1ko"
@@ -611,6 +655,15 @@ svg.i { width: 1em; height: 1em; fill: none; stroke: currentColor; stroke-width:
 .nav .count { margin-left: auto; font-size: 12px; background: var(--accent); color: #fff; padding: 1px 8px; border-radius: 10px; }
 .side .spacer { flex: 1; }
 .side .foot { font-size: 12px; color: var(--faint); padding: 14px 8px 0; }
+.modal.report { width: 560px; display: grid; gap: 12px; }
+.modal.report h2 { margin: 0; }
+.modal.report p { margin: 0; color: var(--muted); }
+.modal.report textarea { width: 100%; resize: vertical; min-height: 110px; padding: 12px 14px; border-radius: 14px; background: rgba(8, 13, 40, .55); border: 1px solid var(--line); color: var(--text); font: inherit; outline: 0; }
+.modal.report textarea:focus { border-color: #7d93ff; box-shadow: 0 0 0 3px rgba(91, 124, 255, 0.18); }
+.rp-contact { height: 46px; }
+.rp-check { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 14px; cursor: pointer; }
+.rp-prev summary { cursor: pointer; color: #a9b9ff; font-size: 13.5px; }
+.rp-prev pre { max-height: 180px; overflow: auto; margin: 8px 0 0; padding: 10px 12px; border-radius: 12px; background: rgba(3, 6, 20, .6); color: var(--muted); font-size: 11.5px; white-space: pre-wrap; word-break: break-word; }
 .langsw { display: flex; gap: 4px; margin: 12px 8px 0; padding: 3px; border-radius: 999px; background: rgba(8, 13, 40, .55); border: 1px solid var(--line); width: max-content; }
 .langsw button { border: 0; background: none; color: var(--muted); font: inherit; font-size: 12px; font-weight: 600; letter-spacing: .04em; padding: 4px 11px; border-radius: 999px; cursor: pointer; }
 .langsw button.on { background: var(--accent); color: #fff; }
@@ -1374,6 +1427,7 @@ input, textarea, .errmsg { user-select: text; -webkit-user-select: text; }
     <div class="spacer"></div>
     <div class="side-status"><div class="pill" id="keyPill"><span class="dot"></span><span id="keyText">Проверяю связь…</span></div></div>
     <nav class="nav" aria-label="Программа">
+      <button id="navReport" type="button"><span class="ic"><svg class="i" viewBox="0 0 24 24"><path d="M12 3.5 21.5 20h-19z"/><path d="M12 10v4.5M12 17.2v.1"/></svg></span><span>Сообщить о проблеме</span></button>
       <button id="navTg" type="button"><span class="ic"><svg class="i" viewBox="0 0 24 24"><path d="M4 12.5 20 5l-3 14-5.5-4.5L9 17l-.5-4.5z"/><path d="m8.5 12.5 8-5.5"/></svg></span><span>Telegram-канал</span></button>
       <button id="navQuit"><span class="ic"><svg class="i" viewBox="0 0 24 24"><path d="M10 4H5v16h5M15 8l4 4-4 4M19 12H9"/></svg></span><span>Выйти</span></button>
     </nav>
@@ -1554,6 +1608,17 @@ input, textarea, .errmsg { user-select: text; -webkit-user-select: text; }
     <div class="foot"><button class="btn" id="uLater">Позже</button><button class="btn primary" id="uGo"><svg class="i" viewBox="0 0 24 24"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14"/></svg>Обновить</button></div>
   </div>
 </div>
+<div class="veil" id="reportVeil">
+  <div class="modal report" role="dialog" aria-labelledby="rpTitle">
+    <h2 id="rpTitle">Сообщить о проблеме</h2>
+    <p>Опишите, что случилось и что вы делали перед этим. Отчёт придёт разработчику в Telegram.</p>
+    <textarea id="rpText" rows="5" maxlength="2000" placeholder="Например: при скачивании клипа появляется ошибка…"></textarea>
+    <label class="field rp-contact"><input id="rpContact" maxlength="200" placeholder="Как с вами связаться (необязательно), например @ник в Telegram"></label>
+    <label class="rp-check"><input type="checkbox" id="rpLog" checked> <span>Приложить журнал ошибок</span></label>
+    <details class="rp-prev"><summary>Что будет отправлено</summary><pre id="rpPreview">…</pre></details>
+    <div class="foot"><button class="btn" id="rpCancel" type="button">Отмена</button><button class="btn primary" id="rpSend" type="button">Отправить</button></div>
+  </div>
+</div>
 <div class="veil" id="keysHelp">
   <div class="modal keys" role="dialog" aria-labelledby="khTitle">
     <h2 id="khTitle">Горячие клавиши</h2>
@@ -1645,6 +1710,12 @@ const EN = {
   "Не удалось обрезать клип (ffmpeg). Подробности в log.txt.": "Couldn’t trim the clip (ffmpeg). See log.txt for details.",
   "Для обрезки нужен ffmpeg, а он не найден рядом с программой. Пересоберите программу новым build-exe.yml.": "Trimming needs ffmpeg, but it wasn’t found next to the app. Reinstall the app.",
   "без названия": "untitled", "нет такой задачи": "no such task", "Перейти к поиску": "Go to search",
+  "Сообщить о проблеме": "Report a problem", "Опишите, что случилось и что вы делали перед этим. Отчёт придёт разработчику в Telegram.": "Describe what happened and what you were doing before. The report goes to the developer on Telegram.",
+  "Например: при скачивании клипа появляется ошибка…": "For example: an error appears when downloading a clip…", "Как с вами связаться (необязательно), например @ник в Telegram": "How to reach you (optional), e.g. your Telegram @name",
+  "Приложить журнал ошибок": "Attach the error log", "Что будет отправлено": "What will be sent", "Отмена": "Cancel", "Отправить": "Send", "Спасибо! Отчёт отправлен.": "Thank you! The report has been sent.",
+  "Опишите, что случилось.": "Please describe what happened.", "Опишите проблему.": "Please describe the problem.", "Слишком много отчётов. Попробуйте через час.": "Too many reports. Please try again in an hour.",
+  "Отчёт сейчас не принимается, попробуйте позже.": "Reports can't be received right now, try again later.", "Не удалось отправить отчёт.": "Couldn't send the report.",
+  "Нет связи с сервером ClipSearch. Проверьте интернет.": "No connection to the ClipSearch server. Check your internet connection.",
   "клип выбран": "clip selected", "клипа выбрано": "clips selected", "клипов выбрано": "clips selected",
 };
 const UNIT = [
@@ -2635,6 +2706,29 @@ if (window.cs) {
   $("wc").addEventListener("click", (e) => { const b = e.target.closest("[data-w]"); if (b) window.cs.win(b.dataset.w); });
 }
 $("navTg").addEventListener("click", () => api("/api/openurl", { url: "https://t.me/ClipSearch" }));
+let rpData = { log: "", os: "", version: "" };
+function rpPaint() {
+  const lines = [(window.CS_LANG === "en" ? "Version: " : "Версия: ") + rpData.version, (window.CS_LANG === "en" ? "System: " : "Система: ") + rpData.os,
+    (window.CS_LANG === "en" ? "Contact: " : "Контакт: ") + ($("rpContact").value.trim() || "—"), "", $("rpText").value.trim() || "…"];
+  if ($("rpLog").checked) lines.push("", "— log.txt —", rpData.log || (window.CS_LANG === "en" ? "(empty)" : "(пусто)"));
+  $("rpPreview").textContent = lines.join("\n");
+}
+$("navReport").addEventListener("click", async () => {
+  showVeil($("reportVeil")); setTimeout(() => $("rpText").focus(), 60);
+  try { rpData = await api("/api/report/preview", {}); } catch (_) {}
+  rpPaint();
+});
+["rpText", "rpContact", "rpLog"].forEach((id) => $(id).addEventListener("input", rpPaint));
+$("rpLog").addEventListener("change", rpPaint);
+$("rpCancel").addEventListener("click", () => hideVeil($("reportVeil")));
+$("reportVeil").addEventListener("mousedown", (e) => { if (e.target === $("reportVeil")) hideVeil($("reportVeil")); });
+$("rpSend").addEventListener("click", async () => {
+  const b = $("rpSend"); b.disabled = true;
+  const r = await api("/api/report", { text: $("rpText").value, contact: $("rpContact").value, log: $("rpLog").checked }).catch(() => ({ error: "нет связи" }));
+  b.disabled = false;
+  if (r.error) { toast(r.error); return; }
+  hideVeil($("reportVeil")); $("rpText").value = ""; toast("Спасибо! Отчёт отправлен.");
+});
 document.querySelectorAll(".langsw button").forEach((b) => {
   b.classList.toggle("on", b.dataset.lang === window.CS_LANG);
   b.addEventListener("click", async () => { if (b.dataset.lang === window.CS_LANG) return; await api("/api/settings", { lang: b.dataset.lang }); location.reload(); });
@@ -2969,6 +3063,7 @@ $("keysHelp").addEventListener("mousedown", (e) => { if (e.target === $("keysHel
 addEventListener("keydown", (e) => {
   if (e.defaultPrevented || menuEl) return;
   if (e.key === "Escape" && isOpen($("keysHelp"))) { hideVeil($("keysHelp")); return; }
+  if (e.key === "Escape" && isOpen($("reportVeil"))) { hideVeil($("reportVeil")); return; }
   if (isTyping(e) || anyVeil() || !$("v-search").classList.contains("on")) return;
   if (e.key === "?") { openKeysHelp(); e.preventDefault(); return; }
   if (e.key === "/") { $("login").focus(); e.preventDefault(); return; }
@@ -3518,6 +3613,12 @@ def make_handler(ctx):
                     raise ValueError("Можно открывать только ссылки Twitch.")
                 webbrowser.open(url)
                 return {"ok": True}
+            if path == "/api/report/preview":
+                return {"log": report_log(), "os": os_name(), "version": VERSION}
+            if path == "/api/report":
+                if len(str(b.get("text", "")).strip()) < 3:
+                    raise ValueError(L("Опишите, что случилось.", "Please describe what happened."))
+                return send_report(b.get("text"), b.get("contact"), bool(b.get("log")))
             if path == "/api/history":
                 return {"history": update_history(ctx, b)}
             if path == "/api/update/check":

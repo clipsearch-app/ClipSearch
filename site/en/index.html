@@ -328,6 +328,11 @@ footer a { color: var(--muted); }
 .top .tgl svg { width: 16px; height: 16px; }
 .btn.tg svg { width: 22px; height: 22px; }
 @media (max-width: 640px) { .top { gap: 10px; } .top .lang { margin-left: auto; } .top .btn-sm { margin-left: 0; padding: 8px 12px; } .brand { font-size: 19px; } }
+
+.dlg.report textarea, .dlg.report input { width: 100%; padding: 12px 14px; border-radius: 14px; background: rgba(8, 13, 40, .55); border: 1px solid var(--line); color: var(--text); font: inherit; font-size: 15px; outline: 0; resize: vertical; }
+.dlg.report textarea:focus, .dlg.report input:focus { border-color: rgba(120, 146, 255, .6); box-shadow: 0 0 0 4px rgba(91, 124, 255, .14); }
+.dlg.report .go { height: 46px; }
+.linkbtn { background: none; border: 0; padding: 0; color: var(--muted); font: inherit; text-decoration: underline; cursor: pointer; }
 </style>
 <script type="application/ld+json">
 {"@context":"https://schema.org","@type":"SoftwareApplication","name":"ClipSearch","operatingSystem":"Windows 10, Windows 11","applicationCategory":"MultimediaApplication","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"url":"https://clipsearch-app.github.io/ClipSearch/","downloadUrl":"https://github.com/clipsearch-app/ClipSearch/releases/latest/download/ClipSearchSetup.exe"}
@@ -613,7 +618,7 @@ footer a { color: var(--muted); }
 
   <footer>
     <span>ClipSearch is an independent app, not affiliated with Twitch.</span>
-    <span><a href="https://t.me/ClipSearch" target="_blank" rel="noopener">Project Telegram channel</a> · <a href="https://github.com/clipsearch-app/ClipSearch/releases">All versions</a> · <a href="https://github.com/clipsearch-app/ClipSearch">Source code</a></span>
+    <span><button type="button" class="linkbtn" data-report>Report a problem</button> · <a href="https://t.me/ClipSearch" target="_blank" rel="noopener">Project Telegram channel</a> · <a href="https://github.com/clipsearch-app/ClipSearch/releases">All versions</a> · <a href="https://github.com/clipsearch-app/ClipSearch">Source code</a></span>
   </footer>
 </div>
 
@@ -697,7 +702,29 @@ footer a { color: var(--muted); }
       <div class="row2"><a class="btn primary" href="${SETUP}"><svg><use href="#dl"/></svg><span class="t"><b>Download ClipSearch</b><small>Windows 10 and 11 · 0.9 MB</small></span></a>
       <button type="button" class="ghostbtn" data-close>Got it</button></div>`);
   }
+  function showReport() {
+    const v = overlay(`<button type="button" class="ib x" data-close aria-label="Close">${IC.x}</button><h3>Report a problem</h3>
+      <p>Describe what doesn’t work. The report goes to the developer on Telegram.</p>
+      <textarea id="rpText" rows="5" maxlength="2000" placeholder="For example: searching a streamer shows an error…"></textarea>
+      <input id="rpContact" maxlength="200" placeholder="How to reach you (optional), e.g. your Telegram @name">
+      <div class="row2"><button type="button" class="go" id="rpSend">Send</button><button type="button" class="ghostbtn" data-close>Cancel</button></div>`, "report");
+    v.querySelector("#rpText").focus();
+    v.querySelector("#rpSend").addEventListener("click", async () => {
+      const text = v.querySelector("#rpText").value.trim();
+      if (text.length < 3) { toast("Please describe what happened."); return; }
+      const btn = v.querySelector("#rpSend"); btn.disabled = true;
+      try {
+        const r = await fetch(`${API}/report`, { method: "POST", headers: { "Content-Type": "application/json", "Accept-Language": LANG },
+          body: JSON.stringify({ text, contact: v.querySelector("#rpContact").value.trim(), meta: { page: location.pathname, lang: LANG, os: navigator.userAgent.slice(0, 120) } }) });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.message || "Couldn’t send the report.");
+        v.remove(); toast("Thank you! The report has been sent.");
+      } catch (e) { btn.disabled = false; toast(e.message || "Couldn’t send the report."); }
+    });
+  }
   document.addEventListener("click", (e) => {
+    const rp = e.target.closest("[data-report]");
+    if (rp) { e.preventDefault(); showReport(); return; }
     const l = e.target.closest("[data-lock]");
     if (l) { e.preventDefault(); showLock(l.dataset.lock); }
   });
