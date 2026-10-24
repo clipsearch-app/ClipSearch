@@ -4,7 +4,7 @@
 
 ## Сайт
 
-Искать клипы можно прямо в браузере: https://clipsearch-app.github.io/ClipSearch/
+Искать клипы можно прямо в браузере: https://clip-search.com/
 
 Новости проекта — в Telegram: https://t.me/ClipSearch
 
@@ -40,7 +40,7 @@ ClipSearch — независимая программа, не связана с
 
 ClipSearch is a free Windows 10/11 app that finds Twitch clips by several streamers, categories and clip authors over any period and downloads them in 1080p, 720p or 480p. The interface is available in English and Russian.
 
-- Website with search: https://clipsearch-app.github.io/ClipSearch/en/
+- Website with search: https://clip-search.com/en/
 - Download: [ClipSearchSetup.exe](https://github.com/clipsearch-app/ClipSearch/releases/latest/download/ClipSearchSetup.exe) or [portable ZIP](https://github.com/clipsearch-app/ClipSearch/releases/latest/download/ClipSearch-win32-x64.zip)
 - News: https://t.me/ClipSearch
 
