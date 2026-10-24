@@ -49,7 +49,7 @@ RELEASE_NOTES = """- Первый публичный выпуск ClipSearch.
 - In-app updates."""
 GITHUB_API = os.environ.get("CLIPS_GITHUB_API", "https://api.github.com")
 
-WORKER_URL = os.environ.get("CLIPS_WORKER_URL", "https://clipsearch-api.clipsearch-app.workers.dev").rstrip("/")
+WORKER_URL = os.environ.get("CLIPS_WORKER_URL", "https://api.clip-search.com").rstrip("/")
 API_BASE = os.environ.get("CLIPS_API_BASE", WORKER_URL + "/helix")
 HEALTH_URL = (API_BASE[: -len("/helix")] if API_BASE.endswith("/helix") else API_BASE) + "/health"
 REPORT_URL = os.environ.get("CLIPS_REPORT_URL", WORKER_URL + "/report")
