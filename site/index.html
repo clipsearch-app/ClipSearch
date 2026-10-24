@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>ClipSearch — поиск и скачивание клипов Twitch</title>
 <meta name="description" content="Найдите любой клип Twitch по стримеру, словам из названия, автору и периоду и скачайте его в 1080p. Бесплатно, без входа и ключей. Приложение ClipSearch для Windows умеет ещё больше.">
+<link rel="alternate" hreflang="ru" href="https://clipsearch-app.github.io/ClipSearch/">
+<link rel="alternate" hreflang="en" href="https://clipsearch-app.github.io/ClipSearch/en/">
+<link rel="alternate" hreflang="x-default" href="https://clipsearch-app.github.io/ClipSearch/en/">
 <link rel="canonical" href="https://clipsearch-app.github.io/ClipSearch/">
 <meta property="og:type" content="website">
 <meta property="og:title" content="ClipSearch — поиск и скачивание клипов Twitch">
@@ -315,6 +318,16 @@ footer a { color: var(--muted); }
   .lockchip { display: none; }
   .go, .ghostbtn { flex: 1; justify-content: center; }
 }
+
+.langbar { position: relative; z-index: 5; display: flex; justify-content: center; align-items: center; gap: 12px; flex-wrap: wrap; padding: 10px 44px; background: #16245a; border-bottom: 1px solid var(--line-strong); font-size: 14.5px; color: var(--text); }
+.langbar a { color: #b9c4ff; font-weight: 600; }
+.langbar button { position: absolute; right: 12px; top: 50%; transform: translateY(-50%); width: 30px; height: 30px; border-radius: 50%; border: 0; background: rgba(255, 255, 255, .08); color: var(--text); font-size: 18px; cursor: pointer; }
+.top .lang { display: inline-flex; align-items: center; justify-content: center; min-width: 40px; height: 36px; padding: 0 10px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); text-decoration: none; font-size: 13px; font-weight: 600; letter-spacing: .04em; }
+.top .lang:hover { color: var(--text); border-color: var(--line-strong); }
+.top .tgl { display: inline-flex; align-items: center; gap: 7px; }
+.top .tgl svg { width: 16px; height: 16px; }
+.btn.tg svg { width: 22px; height: 22px; }
+@media (max-width: 640px) { .top { gap: 10px; } .top .lang { margin-left: auto; } .top .btn-sm { margin-left: 0; padding: 8px 12px; } .brand { font-size: 19px; } }
 </style>
 <script type="application/ld+json">
 {"@context":"https://schema.org","@type":"SoftwareApplication","name":"ClipSearch","operatingSystem":"Windows 10, Windows 11","applicationCategory":"MultimediaApplication","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"url":"https://clipsearch-app.github.io/ClipSearch/","downloadUrl":"https://github.com/clipsearch-app/ClipSearch/releases/latest/download/ClipSearchSetup.exe"}
@@ -334,6 +347,7 @@ footer a { color: var(--muted); }
       <path d="M104 88 L104 144 L150 116 Z" fill="#fff"/>
     </symbol>
     <symbol id="lock" viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="10" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.9"/><path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></symbol>
+    <symbol id="send" viewBox="0 0 24 24"><path d="M4 12.5 20 5l-3 14-5.5-4.5L9 17l-.5-4.5z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="m8.5 12.5 8-5.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
     <symbol id="dl" viewBox="0 0 24 24"><path d="M12 4v11m0 0-4.5-4.5M12 15l4.5-4.5M5 19h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
   </defs>
 </svg>
@@ -348,7 +362,9 @@ footer a { color: var(--muted); }
       <a href="#install">Установка</a>
       <a href="#versions">Что нового</a>
       <a href="#faq">Вопросы</a>
+      <a class="tgl" href="https://t.me/ClipSearch"><svg><use href="#send"/></svg>Telegram</a>
     </nav>
+    <a class="lang" href="en/" hreflang="en" lang="en">EN</a>
     <a class="btn-sm" href="https://github.com/clipsearch-app/ClipSearch/releases/latest/download/ClipSearchSetup.exe"><svg width="16" height="16"><use href="#dl"/></svg>Скачать</a>
   </header>
 
@@ -566,7 +582,7 @@ footer a { color: var(--muted); }
     </div>
     <div class="log glass">
       <div class="ver"><b>1.0</b><span>21 октября 2026</span><span class="now">Текущая</span></div>
-      <div><ul><li>Первый публичный выпуск ClipSearch.</li><li>Поиск по стримерам, категориям, авторам и словам из названия за любой период, график «Когда сняты клипы».</li><li>Скачивание в 1080p, 720p или 480p, вырезание фрагмента во встроенном плеере, очередь загрузок.</li><li>Обновления внутри программы.</li></ul></div>
+      <div><ul><li>Первый публичный выпуск ClipSearch.</li><li>Поиск по стримерам, категориям, авторам и словам из названия за любой период, график «Когда сняты клипы».</li><li>Скачивание в 1080p, 720p или 480p, вырезание фрагмента во встроенном плеере, очередь загрузок.</li><li>Русский и английский язык интерфейса, кнопка Telegram-канала.</li><li>Обновления внутри программы.</li></ul></div>
     </div>
   </section>
 
@@ -591,12 +607,13 @@ footer a { color: var(--muted); }
     <div class="cta">
       <a class="btn primary" href="https://github.com/clipsearch-app/ClipSearch/releases/latest/download/ClipSearchSetup.exe">
         <svg><use href="#dl"/></svg><span class="t"><b>Скачать ClipSearch 1.0</b><small>Windows 10 и 11 · бесплатно</small></span></a>
+      <a class="btn ghost tg" href="https://t.me/ClipSearch" target="_blank" rel="noopener"><svg><use href="#send"/></svg><span class="t"><b>Новости в Telegram</b><small>@ClipSearch</small></span></a>
     </div>
   </div>
 
   <footer>
     <span>ClipSearch — независимая программа, не связана с Twitch.</span>
-    <span><a href="https://github.com/clipsearch-app/ClipSearch/releases">Все версии</a> · <a href="https://github.com/clipsearch-app/ClipSearch">Исходный код</a></span>
+    <span><a href="https://t.me/ClipSearch" target="_blank" rel="noopener">Telegram-канал проекта</a> · <a href="https://github.com/clipsearch-app/ClipSearch/releases">Все версии</a> · <a href="https://github.com/clipsearch-app/ClipSearch">Исходный код</a></span>
   </footer>
 </div>
 
@@ -622,6 +639,7 @@ footer a { color: var(--muted); }
   const API = "https://clipsearch-api.clipsearch-app.workers.dev";
   const SETUP = "https://github.com/clipsearch-app/ClipSearch/releases/latest/download/ClipSearchSetup.exe";
   const MAX_PAGES = 5, PAGE = 24;
+  const LANG = document.documentElement.lang === "en" ? "en" : "ru", LOC = LANG === "en" ? "en-US" : "ru-RU";
   const $ = (id) => document.getElementById(id);
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const store = {
@@ -691,7 +709,7 @@ footer a { color: var(--muted); }
     for (const [k, v] of params) qs.append(k, v);
     let r;
     try {
-      r = await fetch(`${API}/helix${path}?${qs}`, { headers: { "X-ClipSearch": "web" } });
+      r = await fetch(`${API}/helix${path}?${qs}`, { headers: { "X-ClipSearch": "web", "Accept-Language": LANG } });
     } catch (_) {
       throw new Error("Нет связи с сервером ClipSearch. Проверьте интернет и попробуйте ещё раз.");
     }
@@ -712,7 +730,7 @@ footer a { color: var(--muted); }
     return h ? [new Date(now - h * 3600e3), now] : [null, null];
   }
   const periodText = (p) => ({ "1h": "за последний час", "24h": "за 24 часа", "7d": "за 7 дней", "30d": "за 30 дней", all: "за всё время" }[p]);
-  const plural = (n, f) => { const a = n % 10, b = n % 100; return f[a === 1 && b !== 11 ? 0 : a >= 2 && a <= 4 && (b < 12 || b > 14) ? 1 : 2]; };
+  const plural = (n, f) => { if (LANG === "en") return f[n === 1 ? 0 : 2]; const a = n % 10, b = n % 100; return f[a === 1 && b !== 11 ? 0 : a >= 2 && a <= 4 && (b < 12 || b > 14) ? 1 : 2]; };
   const fmtDur = (s) => { s = Math.round(s); return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0"); };
   function ago(d) {
     const m = Math.round((Date.now() - d) / 60000);
@@ -722,7 +740,20 @@ footer a { color: var(--muted); }
     const dd = Math.round(h / 24);
     return dd < 60 ? `${dd} дн назад` : `${Math.round(dd / 30)} мес назад`;
   }
-  const fmtDate = (d) => d.toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
+  const fmtDate = (d) => d.toLocaleString(LOC, { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
+  try {
+    const other = document.querySelector("link[rel=alternate][hreflang]:not([hreflang='" + LANG + "']):not([hreflang='x-default'])");
+    const nav = (navigator.language || "").toLowerCase(), wantsRu = /^(ru|uk|be|kk)/.test(nav);
+    if (other && !store.get("cs_lang_seen") && (LANG === "ru" ? !wantsRu : wantsRu)) {
+      const bar = document.createElement("div");
+      bar.className = "langbar";
+      bar.innerHTML = LANG === "ru" ? 'This site is also available in English. <a href="' + other.href + '">Switch to English</a><button type="button" aria-label="Close">×</button>'
+        : 'Сайт есть и на русском языке. <a href="' + other.href + '">Перейти на русский</a><button type="button" aria-label="Закрыть">×</button>';
+      bar.querySelector("button").addEventListener("click", () => { store.set("cs_lang_seen", "1"); bar.remove(); });
+      bar.querySelector("a").addEventListener("click", () => store.set("cs_lang_seen", "1"));
+      document.body.prepend(bar);
+    }
+  } catch (_) {}
 
   function skeleton() {
     $("list").innerHTML = '<div class="loading">' + '<div class="sk"></div>'.repeat(3) + "</div>";
@@ -756,7 +787,7 @@ footer a { color: var(--muted); }
         for (const c of d.data || []) if (!seen.has(c.id)) { seen.add(c.id); all.push(c); }
         cursor = (d.pagination || {}).cursor || "";
         page++;
-        $("rstatus").textContent = `Просмотрено клипов: ${all.length.toLocaleString("ru-RU")}`;
+        $("rstatus").textContent = `Просмотрено клипов: ${all.length.toLocaleString(LOC)}`;
       } while (cursor && page < MAX_PAGES);
       truncated = Boolean(cursor);
       const words = $("words").value.toLowerCase().split(/\s+/).filter(Boolean);
@@ -779,8 +810,8 @@ footer a { color: var(--muted); }
         game: games[c.game_id] || "", views: c.view_count || 0, dur: c.duration || 0, ts: new Date(c.created_at), thumb: c.thumbnail_url || "",
       }));
       const n = S.rows.length;
-      $("rtitle").textContent = n ? `Найдено ${n.toLocaleString("ru-RU")} ${plural(n, ["клип", "клипа", "клипов"])}` : "Ничего не найдено";
-      let st = `${user.display_name}, ${periodText(S.period)}. Просмотрено клипов: ${all.length.toLocaleString("ru-RU")}.`;
+      $("rtitle").textContent = n ? `Найдено ${n.toLocaleString(LOC)} ${plural(n, ["клип", "клипа", "клипов"])}` : "Ничего не найдено";
+      let st = `${user.display_name}, ${periodText(S.period)}. Просмотрено клипов: ${all.length.toLocaleString(LOC)}.`;
       if (truncated) st += " На сайте просматривается до 500 клипов — глубокий поиск в приложении найдёт все.";
       if (S.period === "all") st += " За всё время Twitch отдаёт самые популярные клипы.";
       $("rstatus").textContent = st;
@@ -809,7 +840,7 @@ footer a { color: var(--muted); }
       <div class="info">
         <h3 title="${esc(r.title)}">${esc(r.title)}</h3>
         <div class="meta"><span title="Стример">${IC.tv}${esc(r.streamer)}</span>${r.creator ? `<span title="Автор клипа">${IC.user}${esc(r.creator)}</span>` : ""}${r.game ? `<span title="Категория">${IC.game}${esc(r.game)}</span>` : ""}</div>
-        <div class="meta"><span>${IC.time}${fmtDate(r.ts)} <span class="ago">(${ago(r.ts)})</span></span><span>${IC.eye}${r.views.toLocaleString("ru-RU")}</span></div>
+        <div class="meta"><span>${IC.time}${fmtDate(r.ts)} <span class="ago">(${ago(r.ts)})</span></span><span>${IC.eye}${r.views.toLocaleString(LOC)}</span></div>
       </div>
       <div class="acts">
         <button type="button" class="ib" data-act="play" title="Смотреть" aria-label="Смотреть">${IC.play.replace('fill="#fff"', 'fill="currentColor"')}</button>
@@ -818,7 +849,7 @@ footer a { color: var(--muted); }
       </div>
     </article>`;
   }
-  function dlUrl(r, q) { return `${API}/web/download?slug=${encodeURIComponent(r.id)}&q=${q}&name=${encodeURIComponent(r.title.slice(0, 70))}`; }
+  function dlUrl(r, q) { return `${API}/web/download?slug=${encodeURIComponent(r.id)}&q=${q}&name=${encodeURIComponent(r.title.slice(0, 70))}&lang=${LANG}`; }
   function render(reset) {
     const list = $("list");
     if (reset) { S.shown = 0; list.innerHTML = ""; }
@@ -831,18 +862,18 @@ footer a { color: var(--muted); }
     list.insertAdjacentHTML("beforeend", next.map((r, i) => card(r, i)).join(""));
     S.shown += next.length;
     $("more").hidden = S.shown >= rows.length;
-    $("more").textContent = `Показать ещё (${(rows.length - S.shown).toLocaleString("ru-RU")})`;
+    $("more").textContent = `Показать ещё (${(rows.length - S.shown).toLocaleString(LOC)})`;
   }
 
   async function play(r) {
     const v = overlay(`<button type="button" class="ib x" data-close aria-label="Закрыть">${IC.x}</button>
       <video controls playsinline preload="metadata"${r.thumb ? ` poster="${esc(r.thumb)}"` : ""}></video>
       <p class="ptitle">${esc(r.title)}</p>
-      <p class="pmeta">${esc(r.streamer)}${r.creator ? " · автор " + esc(r.creator) : ""} · ${fmtDur(r.dur)} · ${r.views.toLocaleString("ru-RU")} просмотров</p>
+      <p class="pmeta">${esc(r.streamer)}${r.creator ? " · автор " + esc(r.creator) : ""} · ${fmtDur(r.dur)} · ${r.views.toLocaleString(LOC)} просмотров</p>
       <div class="pbtns" id="pbtns"><span class="pmeta">Загружаю видео…</span></div>`, "player");
     const box = v.querySelector("#pbtns"), video = v.querySelector("video");
     try {
-      const res = await fetch(`${API}/web/video?slug=${encodeURIComponent(r.id)}`, { headers: { "X-ClipSearch": "web" } });
+      const res = await fetch(`${API}/web/video?slug=${encodeURIComponent(r.id)}`, { headers: { "X-ClipSearch": "web", "Accept-Language": LANG } });
       const d = await res.json();
       if (!res.ok) throw new Error(d.message || "Twitch не отдал видео.");
       const q = d.qualities || [];
