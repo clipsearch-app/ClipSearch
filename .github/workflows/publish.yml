@@ -1,0 +1,64 @@
+name: publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "release = выпустить тестовую сборку для всех; discard = удалить тестовую сборку; dry-run = только проверка"
+        type: choice
+        options: [release, discard, dry-run]
+        default: release
+      version:
+        description: "Версия, например 1.1. Пусто = последняя тестовая"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      ACTION: ${{ inputs.action }}
+      V: ${{ inputs.version }}
+    steps:
+      - name: Find the test build
+        run: |
+          v="$V"
+          if [ -z "$v" ]; then
+            v=$(gh release list --limit 100 --json tagName,isPrerelease,createdAt -q '[.[] | select(.isPrerelease and (.tagName | endswith("-test")))] | sort_by(.createdAt) | last | .tagName // ""' | sed 's/^v//; s/-test$//')
+          fi
+          echo "$v" | grep -Eq '^[0-9]+(\.[0-9]+){1,3}$' || { echo "::error::No test build found ($v)"; exit 1; }
+          gh release view "v$v-test" --json tagName >/dev/null || { echo "::error::Test build v$v-test not found"; exit 1; }
+          echo "VER=$v" >> "$GITHUB_ENV"
+          echo "::notice::Test build: $v"
+      - name: Discard
+        if: env.ACTION == 'discard'
+        run: |
+          gh release delete "v$VER-test" --cleanup-tag --yes
+          echo "::notice::Test build $VER deleted"
+      - name: Release
+        if: env.ACTION != 'discard'
+        run: |
+          set -e
+          if gh release view "v$VER" --json tagName >/dev/null 2>&1; then echo "::error::Version $VER is already released"; exit 1; fi
+          gh release view "v$VER-test" --json body -q .body | python3 -c "import sys; b=sys.stdin.read(); p='Тестовая сборка. Не для общего доступа.'; b=b.split(p,1)[1] if p in b else b; print(b.strip())" > notes.md
+          sha=$(gh api "repos/$GH_REPO/commits/v$VER-test" -q .sha)
+          mkdir a && gh release download "v$VER-test" -D a
+          ls -la a
+          if [ "$ACTION" = "dry-run" ]; then
+            gh release create "v$VER" a/* --title "ClipSearch $VER" --notes-file notes.md --target "$sha" --draft
+            gh release view "v$VER" --json isDraft,assets -q '{draft: .isDraft, assets: [.assets[].name]}'
+            gh release delete "v$VER" --yes
+            echo "::notice::Dry run OK: $VER would be released from $sha"
+          else
+            gh release create "v$VER" a/* --title "ClipSearch $VER" --notes-file notes.md --target "$sha" --latest
+            gh release delete "v$VER-test" --cleanup-tag --yes
+            echo "::notice::Released $VER: https://github.com/$GH_REPO/releases/tag/v$VER"
+          fi

@@ -2,6 +2,11 @@ name: build-exe
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Rehearsal only: build under another version number"
+        required: false
+        default: ""
   push:
     branches: [main]
     paths:
@@ -22,6 +27,14 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Rehearsal version
+        if: ${{ inputs.version != '' }}
+        env:
+          V: ${{ inputs.version }}
+        run: |
+          if ($env:V -notmatch '^\d+(\.\d+){1,3}$') { throw "bad version" }
+          (Get-Content clip_search.py -Raw -Encoding utf8) -replace '(?m)^VERSION = "[^"]*"', "VERSION = `"$env:V`"" | Set-Content clip_search.py -Encoding utf8 -NoNewline
+
       - name: Install PyInstaller
         run: python -m pip install --quiet pyinstaller
 
@@ -36,6 +49,17 @@ jobs:
           $ver = python clip_search.py --version
           "APP_VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Output "Version: $ver"
+
+      - name: Refuse to rebuild a released version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $r = gh release view "v$env:APP_VERSION" --json isPrerelease 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Output "::error::Version $env:APP_VERSION is already released. Raise VERSION in clip_search.py for a new test build."
+            throw "version already released"
+          }
+          $global:LASTEXITCODE = 0
 
       - name: Build the engine (clip_backend.exe)
         run: |
@@ -121,22 +145,34 @@ jobs:
           if ($p.ExitCode -ne 0) { Write-Output "::warning::installer window exit code $($p.ExitCode)"; throw "exit $($p.ExitCode)" }
           Write-Output "::notice::Installer window opens"
 
-      - name: Publish to GitHub Releases
+      - name: Publish the test build (pre-release, not offered to users)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = "v$env:APP_VERSION"
+          $tag = "v$env:APP_VERSION-test"
           gh release view $tag *> $null
-          if ($LASTEXITCODE -ne 0) {
-            gh release create $tag --title "ClipSearch $env:APP_VERSION" --notes-file notes.md --latest
-            if ($LASTEXITCODE -ne 0) { throw "release create failed" }
-          } else {
-            gh release edit $tag --notes-file notes.md --latest
+          if ($LASTEXITCODE -eq 0) {
+            gh release delete $tag --cleanup-tag --yes
+            if ($LASTEXITCODE -ne 0) { throw "old test release delete failed" }
           }
-          gh release upload $tag ClipSearch-win32-x64.zip setup/ClipSearchSetup.exe --clobber
-          if ($LASTEXITCODE -ne 0) { throw "release upload failed" }
+          $body = "Тестовая сборка. Не для общего доступа.`n`n" + (Get-Content notes.md -Raw -Encoding utf8)
+          Set-Content test-notes.md $body -Encoding utf8
+          gh release create $tag ClipSearch-win32-x64.zip setup/ClipSearchSetup.exe --title "ClipSearch $env:APP_VERSION (test)" --notes-file test-notes.md --prerelease --latest=false --target $env:GITHUB_SHA
+          if ($LASTEXITCODE -ne 0) { throw "test release create failed" }
           $global:LASTEXITCODE = 0
-          Write-Output "::notice::Published $tag"
+          Write-Output "::notice::Test build: https://github.com/$env:GITHUB_REPOSITORY/releases/tag/$tag"
+
+      - name: Check the test installer downloads this build
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "cs-net-test\ClipSearch"
+          $p = Start-Process -FilePath setup/ClipSearchSetup.exe -ArgumentList @("--silent", "--dir", "`"$dir`"", "--no-shortcuts", "--no-register") -PassThru -Wait
+          $logf = Join-Path $env:TEMP "ClipSearchSetup.log"
+          if (Test-Path $logf) { Get-Content $logf -Tail 12 }
+          if ($p.ExitCode -ne 0) { throw "installer exit code $($p.ExitCode)" }
+          $pv = (Get-Item (Join-Path $dir "ClipSearch.exe")).VersionInfo.ProductVersion
+          Write-Output "Installed: $pv"
+          if (-not $pv.StartsWith($env:APP_VERSION)) { Write-Output "::error::installed $pv, expected $env:APP_VERSION"; throw "wrong version installed" }
+          Write-Output "::notice::Test installer installs $pv"
 
       - uses: actions/upload-artifact@v4
         with:
