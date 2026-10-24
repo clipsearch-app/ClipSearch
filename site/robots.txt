@@ -1,3 +1,3 @@
 User-agent: *
 Allow: /
-Sitemap: https://clipsearch-app.github.io/ClipSearch/sitemap.xml
+Sitemap: https://clip-search.com/sitemap.xml
