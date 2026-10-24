@@ -2,6 +2,10 @@
 
 Программа для Windows 10 и 11: ищет клипы Twitch у нескольких стримеров, в категориях и у нужных авторов за любой период и скачивает их в 1080p, 720p или 480p.
 
+## Сайт
+
+Искать клипы можно прямо в браузере: https://clipsearch-app.github.io/ClipSearch/
+
 ## Скачать
 
 - [ClipSearchSetup.exe](https://github.com/clipsearch-app/ClipSearch/releases/latest/download/ClipSearchSetup.exe) — установщик (рекомендуется)
