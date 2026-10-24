@@ -16,10 +16,16 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: build-exe
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: windows-latest
     timeout-minutes: 40
+    outputs:
+      version: ${{ steps.ver.outputs.v }}
     steps:
       - uses: actions/checkout@v5
 
@@ -42,12 +48,14 @@ jobs:
         run: python clip_search.py --selftest
 
       - name: Write the window and installer sources
+        id: ver
         run: |
           python clip_search.py --write-host host
           python clip_search.py --write-installer installer
           python clip_search.py --notes notes.md
           $ver = python clip_search.py --version
           "APP_VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "v=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           Write-Output "Version: $ver"
 
       - name: Refuse to rebuild a released version
@@ -145,27 +153,192 @@ jobs:
           if ($p.ExitCode -ne 0) { Write-Output "::warning::installer window exit code $($p.ExitCode)"; throw "exit $($p.ExitCode)" }
           Write-Output "::notice::Installer window opens"
 
-      - name: Publish the test build (pre-release, not offered to users)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: win-release
+          path: |
+            ClipSearch-win32-x64.zip
+            setup/ClipSearchSetup.exe
+            notes.md
+          retention-days: 30
+
+  mac:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Rehearsal version
+        if: ${{ inputs.version != '' }}
+        env:
+          V: ${{ inputs.version }}
+        run: |
+          echo "$V" | grep -Eq '^[0-9]+(\.[0-9]+){1,3}$' || { echo "bad version"; exit 1; }
+          sed -i '' -E "s/^VERSION = \"[^\"]*\"/VERSION = \"$V\"/" clip_search.py
+          grep -m1 '^VERSION' clip_search.py
+
+      - name: Python (universal2) and PyInstaller
+        run: |
+          curl -sSfLo py.pkg https://www.python.org/ftp/python/3.12.10/python-3.12.10-macos11.pkg
+          sudo installer -pkg py.pkg -target / > /dev/null
+          PY=/Library/Frameworks/Python.framework/Versions/3.12/bin/python3
+          echo "PY=$PY" >> "$GITHUB_ENV"
+          $PY -m pip install --quiet pyinstaller
+          $PY -c "import platform, sys; print(platform.machine(), sys.version)"
+          $PY clip_search.py --selftest
+          echo "APP_VERSION=$($PY clip_search.py --version)" >> "$GITHUB_ENV"
+
+      - name: Refuse to rebuild a released version
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = "v$env:APP_VERSION-test"
-          gh release view $tag *> $null
-          if ($LASTEXITCODE -eq 0) {
-            gh release delete $tag --cleanup-tag --yes
-            if ($LASTEXITCODE -ne 0) { throw "old test release delete failed" }
-          }
-          $body = "Тестовая сборка. Не для общего доступа.`n`n" + (Get-Content notes.md -Raw -Encoding utf8)
-          Set-Content test-notes.md $body -Encoding utf8
-          gh release create $tag ClipSearch-win32-x64.zip setup/ClipSearchSetup.exe --title "ClipSearch $env:APP_VERSION (test)" --notes-file test-notes.md --prerelease --latest=false --target $env:GITHUB_SHA
-          if ($LASTEXITCODE -ne 0) { throw "test release create failed" }
-          $global:LASTEXITCODE = 0
-          Write-Output "::notice::Test build: https://github.com/$env:GITHUB_REPOSITORY/releases/tag/$tag"
+          if gh release view "v$APP_VERSION" --json tagName > /dev/null 2>&1; then
+            echo "::error::Version $APP_VERSION is already released. Raise VERSION in clip_search.py for a new test build."
+            exit 1
+          fi
 
+      - name: Write the Mac sources
+        run: $PY clip_search.py --write-mac mac && ls mac
+
+      - name: Build the engine (universal)
+        run: |
+          $PY -m PyInstaller --noconfirm --clean --onedir --target-arch universal2 --name clip_backend clip_search.py
+          lipo -archs dist/clip_backend/clip_backend
+
+      - name: Get ffmpeg (universal)
+        run: |
+          for a in arm64 x64; do curl -sSfL "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-darwin-$a.gz" | gunzip > "ffmpeg-$a"; done
+          lipo -create -output dist/clip_backend/ffmpeg ffmpeg-arm64 ffmpeg-x64
+          chmod +x dist/clip_backend/ffmpeg
+          codesign --force --sign - dist/clip_backend/ffmpeg
+          lipo -archs dist/clip_backend/ffmpeg
+          dist/clip_backend/ffmpeg -hide_banner -version | head -1
+
+      - name: Build the window (Swift, universal) and the icon
+        run: |
+          cd mac
+          swiftc -O -target arm64-apple-macos11 main.swift -o host-arm64
+          swiftc -O -target x86_64-apple-macos11 main.swift -o host-x64
+          lipo -create -output ClipSearch host-arm64 host-x64
+          lipo -archs ClipSearch
+          swiftc mkicon.swift -o mkicon && ./mkicon icon_1024.png
+          mkdir AppIcon.iconset
+          for s in 16 32 128 256 512; do
+            sips -z $s $s icon_1024.png --out "AppIcon.iconset/icon_${s}x${s}.png" > /dev/null
+            d=$((s * 2)); sips -z $d $d icon_1024.png --out "AppIcon.iconset/icon_${s}x${s}@2x.png" > /dev/null
+          done
+          iconutil -c icns AppIcon.iconset -o AppIcon.icns
+
+      - name: Assemble ClipSearch.app
+        run: |
+          A=out/ClipSearch.app
+          mkdir -p "$A/Contents/MacOS" "$A/Contents/Resources"
+          cp mac/ClipSearch "$A/Contents/MacOS/ClipSearch"
+          cp mac/Info.plist "$A/Contents/Info.plist"
+          cp mac/AppIcon.icns "$A/Contents/Resources/AppIcon.icns"
+          ditto dist/clip_backend "$A/Contents/Resources/backend"
+          plutil -lint "$A/Contents/Info.plist"
+          find "$A/Contents/Resources/backend" -type f | while read -r f; do
+            if file "$f" | grep -q "Mach-O"; then codesign --force --sign - "$f"; fi
+          done
+          codesign --force --sign - "$A"
+          codesign --verify --deep --strict --verbose=2 "$A"
+          du -sh "$A"
+
+      - name: Check the engine
+        run: |
+          B=out/ClipSearch.app/Contents/Resources/backend/clip_backend
+          $B --selftest
+          arch -x86_64 $B --version && echo "::notice::Intel engine runs (Rosetta)" || echo "::warning::Intel engine not checked"
+
+      - name: Check the window opens
+        run: |
+          rm -f "$TMPDIR/clipsearch-smoke.txt"
+          out/ClipSearch.app/Contents/MacOS/ClipSearch --smoke &
+          p=$!
+          for i in $(seq 1 90); do kill -0 $p 2>/dev/null || break; sleep 1; done
+          kill $p 2>/dev/null || true
+          tail -n 15 "$HOME/Library/Application Support/ClipSearch/window-log.txt" || true
+          tail -n 15 "$HOME/Library/Application Support/ClipSearch/log.txt" || true
+          r=$(cat "$TMPDIR/clipsearch-smoke.txt" 2>/dev/null || echo "no smoke log")
+          echo "$r"
+          case "$r" in *"SMOKE OK"*) echo "::notice::Mac window check: $r" ;; *) echo "::error::Mac window check: $r"; exit 1 ;; esac
+
+      - name: Pack the dmg (download) and the zip (updates)
+        run: |
+          ditto -c -k --keepParent out/ClipSearch.app ClipSearch-mac.zip
+          mkdir dmg
+          ditto out/ClipSearch.app dmg/ClipSearch.app
+          ln -s /Applications dmg/Applications
+          cp mac/howto.txt "dmg/Если не открывается - How to open.txt"
+          for i in 1 2 3; do hdiutil create -volname ClipSearch -srcfolder dmg -ov -format UDZO ClipSearch-mac.dmg && break; sleep 5; done
+          test -f ClipSearch-mac.dmg
+          echo "::notice::Mac dmg: $(du -h ClipSearch-mac.dmg | cut -f1), zip: $(du -h ClipSearch-mac.zip | cut -f1)"
+
+      - name: Check the update zip unpacks into a working app
+        run: |
+          d=$(mktemp -d)
+          ditto -x -k ClipSearch-mac.zip "$d"
+          codesign --verify --deep --strict "$d/ClipSearch.app"
+          "$d/ClipSearch.app/Contents/Resources/backend/clip_backend" --version
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac-release
+          path: |
+            ClipSearch-mac.dmg
+            ClipSearch-mac.zip
+          retention-days: 30
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac-icon
+          path: mac/icon_1024.png
+          retention-days: 7
+
+  release:
+    needs: [build, mac]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VER: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: win-release
+          path: rel
+      - uses: actions/download-artifact@v4
+        with:
+          name: mac-release
+          path: rel
+      - name: Publish the test build (pre-release, not offered to users)
+        run: |
+          set -e
+          ls -la rel rel/setup
+          tag="v$VER-test"
+          if gh release view "$tag" --json tagName > /dev/null 2>&1; then gh release delete "$tag" --cleanup-tag --yes; fi
+          { echo "Тестовая сборка. Не для общего доступа."; echo; cat rel/notes.md; } > test-notes.md
+          gh release create "$tag" rel/ClipSearch-win32-x64.zip rel/setup/ClipSearchSetup.exe rel/ClipSearch-mac.dmg rel/ClipSearch-mac.zip \
+            --title "ClipSearch $VER (test)" --notes-file test-notes.md --prerelease --latest=false --target "$GITHUB_SHA"
+          echo "::notice::Test build: https://github.com/$GH_REPO/releases/tag/$tag"
+
+  win-net-check:
+    needs: [build, release]
+    runs-on: windows-latest
+    env:
+      APP_VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: win-release
+          path: rel
+      - name: Move the installer
+        run: Copy-Item rel/setup/ClipSearchSetup.exe rel/ClipSearchSetup.exe
       - name: Check the test installer downloads this build
         run: |
           $dir = Join-Path $env:RUNNER_TEMP "cs-net-test\ClipSearch"
-          $p = Start-Process -FilePath setup/ClipSearchSetup.exe -ArgumentList @("--silent", "--dir", "`"$dir`"", "--no-shortcuts", "--no-register") -PassThru -Wait
+          $p = Start-Process -FilePath rel/ClipSearchSetup.exe -ArgumentList @("--silent", "--dir", "`"$dir`"", "--no-shortcuts", "--no-register") -PassThru -Wait
           $logf = Join-Path $env:TEMP "ClipSearchSetup.log"
           if (Test-Path $logf) { Get-Content $logf -Tail 12 }
           if ($p.ExitCode -ne 0) { throw "installer exit code $($p.ExitCode)" }
@@ -173,15 +346,3 @@ jobs:
           Write-Output "Installed: $pv"
           if (-not $pv.StartsWith($env:APP_VERSION)) { Write-Output "::error::installed $pv, expected $env:APP_VERSION"; throw "wrong version installed" }
           Write-Output "::notice::Test installer installs $pv"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ClipSearchSetup
-          path: setup/ClipSearchSetup.exe
-          retention-days: 30
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ClipSearch
-          path: app
-          retention-days: 30

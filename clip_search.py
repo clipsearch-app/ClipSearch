@@ -13,13 +13,16 @@ import urllib.request
 import webbrowser
 from datetime import datetime, timedelta, timezone
 
-VERSION = "1.0"
+VERSION = "1.1"
 REPO = "clipsearch-app/ClipSearch"
 TG_URL = "https://t.me/ClipSearch"
 LANG = {"code": "ru"}
 
 
 def system_lang():
+    env = os.environ.get("CLIPS_SYS_LANG", "")
+    if env in ("ru", "en"):
+        return env
     try:
         import ctypes
         primary = ctypes.windll.kernel32.GetUserDefaultUILanguage() & 0x3FF
@@ -34,19 +37,15 @@ def L(ru, en):
     return en if LANG["code"] == "en" else ru
 
 
-RELEASE_NOTES = """- Первый публичный выпуск ClipSearch.
-- Поиск клипов Twitch по стримерам, категориям, авторам и словам из названия за любой период.
-- Скачивание в 1080p, 720p или 480p, вырезание фрагмента во встроенном плеере, очередь загрузок.
-- Русский и английский язык интерфейса, кнопка Telegram-канала.
-- Обновления внутри программы.
+RELEASE_NOTES = """- ClipSearch теперь есть для macOS: Apple Silicon (M1 и новее) и Intel, macOS 11 и новее.
+- Установщик для Windows ставит именно ту версию, которую вы скачали.
+- Мелкие исправления.
 
 <!-- en -->
 ### English
-- First public release of ClipSearch.
-- Search Twitch clips by streamers, categories, authors and title words over any period.
-- Download in 1080p, 720p or 480p, trim clips in the built-in player, download queue.
-- English and Russian interface, Telegram channel button.
-- In-app updates."""
+- ClipSearch is now available for macOS: Apple Silicon (M1 and newer) and Intel, macOS 11 or later.
+- The Windows installer now installs exactly the version you downloaded.
+- Minor fixes."""
 GITHUB_API = os.environ.get("CLIPS_GITHUB_API", "https://api.github.com")
 
 WORKER_URL = os.environ.get("CLIPS_WORKER_URL", "https://api.clip-search.com").rstrip("/")
@@ -74,6 +73,8 @@ def report_log(limit=12000):
 def os_name():
     try:
         import platform
+        if sys.platform == "darwin":
+            return f"macOS {platform.mac_ver()[0]} ({platform.machine()})"
         return f"{platform.system()} {platform.release()} ({platform.version()})"
     except Exception:
         return sys.platform
@@ -107,7 +108,10 @@ def config_path():
     override = os.environ.get("CLIPS_CONFIG")
     if override:
         return override
-    base = os.environ.get("APPDATA") or os.path.join(os.path.expanduser("~"), ".config")
+    if sys.platform == "darwin":
+        base = os.path.join(os.path.expanduser("~"), "Library", "Application Support")
+    else:
+        base = os.environ.get("APPDATA") or os.path.join(os.path.expanduser("~"), ".config")
     return os.path.join(base, "ClipSearch", "config.json")
 
 def load_config():
@@ -2701,7 +2705,7 @@ if (window.cs && window.cs.drag) {
     z.addEventListener("dblclick", () => window.cs.win("max"));
   });
 }
-if (window.cs) {
+if (window.cs && !window.cs.nativeFrame) {
   document.body.classList.add("has-wc"); $("wc").hidden = false;
   $("wc").addEventListener("click", (e) => { const b = e.target.closest("[data-w]"); if (b) window.cs.win(b.dataset.w); });
 }
@@ -3145,7 +3149,10 @@ HEARTBEAT_LIMIT = 150
 BYE_DELAY = 6
 
 def data_dir():
-    base = os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), ".local", "share")
+    if sys.platform == "darwin":
+        base = os.path.join(os.path.expanduser("~"), "Library", "Application Support")
+    else:
+        base = os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), ".local", "share")
     path = os.path.join(base, "ClipSearch")
     os.makedirs(path, exist_ok=True)
     return path
@@ -3333,6 +3340,15 @@ def parse_iso(s):
         raise ValueError("Не удалось прочитать дату.")
 
 def pick_folder(initial):
+    if sys.platform == "darwin":
+        prompt = L("Куда сохранять клипы", "Where to save clips").replace('"', "")
+        loc = f' default location (POSIX file "{initial}")' if initial and os.path.isdir(initial) and '"' not in initial else ""
+        try:
+            r = subprocess.run(["osascript", "-e", f'POSIX path of (choose folder with prompt "{prompt}"{loc})'],
+                               capture_output=True, timeout=600)
+            return r.stdout.decode("utf-8", "replace").strip().rstrip("/") or ""
+        except Exception:
+            return ""
     if not sys.platform.startswith("win"):
         return ""
     script = (
@@ -3360,6 +3376,8 @@ def reveal(path):
                 subprocess.Popen(["explorer", "/select,", path])
             else:
                 os.startfile(path)
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", "-R", path] if os.path.isfile(path) else ["open", path])
     except Exception as e:
         log(f"reveal: {e!r}")
 
@@ -3368,6 +3386,8 @@ def vtuple(v):
         return tuple(int(x) for x in re.findall(r"\d+", str(v))[:4]) or (0,)
     except Exception:
         return (0,)
+
+UPDATE_ASSET = "ClipSearch-mac.zip" if sys.platform == "darwin" else "ClipSearchSetup.exe"
 
 def check_update():
     req = urllib.request.Request(f"{GITHUB_API}/repos/{REPO}/releases/latest",
@@ -3379,7 +3399,7 @@ def check_update():
         log(f"update check: {e!r}")
         raise TwitchError("Не удалось проверить обновления: нет связи с GitHub.")
     latest = str(d.get("tag_name", "")).lstrip("vV")
-    setup = next((a for a in d.get("assets") or [] if a.get("name") == "ClipSearchSetup.exe"), None)
+    setup = next((a for a in d.get("assets") or [] if a.get("name") == UPDATE_ASSET), None)
     return {
         "current": VERSION, "latest": latest, "newer": vtuple(latest) > vtuple(VERSION),
         "notes": str(d.get("body") or ""), "setupUrl": setup.get("browser_download_url") if setup else "",
@@ -3388,7 +3408,10 @@ def check_update():
 
 def download_setup(info, job):
     import tempfile
-    path = os.path.join(tempfile.gettempdir(), f"ClipSearchSetup-{info['latest']}.exe")
+    if sys.platform == "darwin":
+        path = os.path.join(tempfile.gettempdir(), f"ClipSearch-mac-{info['latest']}.zip")
+    else:
+        path = os.path.join(tempfile.gettempdir(), f"ClipSearchSetup-{info['latest']}.exe")
     tmp = path + ".part"
     req = urllib.request.Request(info["setupUrl"], headers={"User-Agent": "ClipSearch"})
     with urllib.request.urlopen(req, timeout=30) as r, open(tmp, "wb") as f:
@@ -3646,6 +3669,8 @@ def make_handler(ctx):
                     raise ValueError("Файл не найден: возможно, его переместили или удалили.")
                 if sys.platform.startswith("win"):
                     os.startfile(p)
+                elif sys.platform == "darwin":
+                    subprocess.Popen(["open", p])
                 return {"ok": True}
             if path == "/api/reveal":
                 p = str(b.get("path", "")) or ctx.download_dir()
@@ -3768,6 +3793,12 @@ def message_box(text):
 
         ctypes.windll.user32.MessageBoxW(0, text, "ClipSearch", 0x10)
     except Exception:
+        if sys.platform == "darwin":
+            try:
+                subprocess.run(["osascript", "-e", "display alert \"ClipSearch\" message " + json.dumps(str(text))], timeout=120)
+                return
+            except Exception:
+                pass
         try:
             print(text)
         except Exception:
@@ -3815,6 +3846,11 @@ INSTALLER_B64 = "eNrsvWt3HMd1KPpXihQlzVgzjZnBAAQBPgKSoISIIHkISLJMMFTPdA/Qwkz3uLs
 
 def write_installer(folder):
     unpack_sources(INSTALLER_B64, folder)
+
+MAC_B64 = "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"
+
+def write_mac(folder):
+    unpack_sources(MAC_B64, folder)
 
 def serve(port, token):
     ctx = Ctx()
@@ -3886,6 +3922,9 @@ def main():
         return 0
     if "--write-installer" in sys.argv:
         write_installer(arg_value("--write-installer") or "installer")
+        return 0
+    if "--write-mac" in sys.argv:
+        write_mac(arg_value("--write-mac") or "mac")
         return 0
     if "--serve" in sys.argv:
         try:
