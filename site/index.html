@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>ClipSearch — поиск и скачивание клипов Twitch</title>
-<meta name="description" content="Найдите любой клип Twitch по стримеру, словам из названия, автору и периоду и скачайте его в 1080p. Бесплатно, без входа и ключей. Приложение ClipSearch для Windows умеет ещё больше.">
+<meta name="description" content="Найдите любой клип Twitch по стримеру, словам из названия, автору и периоду и скачайте его в 1080p. Бесплатно, без входа и ключей. Приложение ClipSearch для Windows и macOS умеет ещё больше.">
 <link rel="alternate" hreflang="ru" href="https://clip-search.com/">
 <link rel="alternate" hreflang="en" href="https://clip-search.com/en/">
 <link rel="alternate" hreflang="x-default" href="https://clip-search.com/en/">
@@ -333,9 +333,15 @@ footer a { color: var(--muted); }
 .dlg.report textarea:focus, .dlg.report input:focus { border-color: rgba(120, 146, 255, .6); box-shadow: 0 0 0 4px rgba(91, 124, 255, .14); }
 .dlg.report .go { height: 46px; }
 .linkbtn { background: none; border: 0; padding: 0; color: var(--muted); font: inherit; text-decoration: underline; cursor: pointer; }
+
+.steps[hidden] { display: none; }
+.ostabs { display: flex; justify-content: center; gap: 6px; width: max-content; margin: 0 auto 22px; padding: 5px; border-radius: 999px; border: 1px solid var(--line); background: rgba(8, 12, 40, .5); }
+.ostabs button { font: inherit; font-size: 15px; font-weight: 600; color: var(--muted); background: none; border: 0; border-radius: 999px; padding: 9px 22px; cursor: pointer; transition: color .2s, background .2s; }
+.ostabs button:hover { color: var(--text); }
+.ostabs button.on { color: #fff; background: linear-gradient(135deg, #7290ff, #5b7cff 55%, #7a63ff); box-shadow: 0 8px 22px rgba(80, 110, 255, .35); }
 </style>
 <script type="application/ld+json">
-{"@context":"https://schema.org","@type":"SoftwareApplication","name":"ClipSearch","operatingSystem":"Windows 10, Windows 11","applicationCategory":"MultimediaApplication","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"url":"https://clip-search.com/","downloadUrl":"https://github.com/clipsearch-app/ClipSearch/releases/latest/download/ClipSearchSetup.exe"}
+{"@context":"https://schema.org","@type":"SoftwareApplication","name":"ClipSearch","operatingSystem":"Windows 10, Windows 11, macOS 11","applicationCategory":"MultimediaApplication","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"url":"https://clip-search.com/","downloadUrl":"https://github.com/clipsearch-app/ClipSearch/releases/latest/download/ClipSearchSetup.exe"}
 </script>
 </head>
 <body>
@@ -375,7 +381,7 @@ footer a { color: var(--muted); }
 
   <main id="top">
     <div class="hero">
-      <span class="eyebrow"><span class="dot"></span>Поиск прямо на сайте · приложение для Windows 10 и 11 · бесплатно</span>
+      <span class="eyebrow"><span class="dot"></span>Поиск прямо на сайте · приложение для Windows и macOS · бесплатно</span>
       <h1>Любой клип с Twitch <em>за минуту</em></h1>
       <p class="lede">Впишите стримера, выберите период — и найдите нужный момент. Посмотрите клип и скачайте его в 1080p. Всё остальное умеет приложение ClipSearch.</p>
     </div>
@@ -453,11 +459,11 @@ footer a { color: var(--muted); }
       <button type="button" class="more" id="more" hidden>Показать ещё</button>
     </section>
 
-    <div class="cta center">
-      <a class="btn primary" href="https://github.com/clipsearch-app/ClipSearch/releases/latest/download/ClipSearchSetup.exe">
-        <svg><use href="#dl"/></svg><span class="t"><b>Скачать приложение</b><small>Windows 10 и 11 · установщик 0,9 МБ</small></span></a>
-      <a class="btn ghost" href="https://github.com/clipsearch-app/ClipSearch/releases/latest/download/ClipSearch-win32-x64.zip">
-        <svg><use href="#dl"/></svg><span class="t"><b>Без установки</b><small>Архив ZIP · 36 МБ</small></span></a>
+    <div class="cta center dlpick">
+      <a class="btn primary" data-os="win" href="https://github.com/clipsearch-app/ClipSearch/releases/latest/download/ClipSearchSetup.exe">
+        <svg><use href="#dl"/></svg><span class="t"><b>Скачать для Windows</b><small>Windows 10 и 11 · установщик 0,9 МБ</small></span></a>
+      <a class="btn ghost" data-os="mac" href="https://github.com/clipsearch-app/ClipSearch/releases/latest/download/ClipSearch-mac.dmg">
+        <svg><use href="#dl"/></svg><span class="t"><b>Скачать для Mac</b><small>macOS 11 и новее · DMG · 65 МБ</small></span></a>
     </div>
   </main>
 </div>
@@ -480,11 +486,13 @@ footer a { color: var(--muted); }
         <div class="shine"></div>
       </div>
     </div>
-    <div class="cta center">
-      <a class="btn primary" href="https://github.com/clipsearch-app/ClipSearch/releases/latest/download/ClipSearchSetup.exe">
-        <svg><use href="#dl"/></svg><span class="t"><b>Скачать ClipSearch</b><small>Установщик · 0,9 МБ</small></span></a>
+    <div class="cta center dlpick">
+      <a class="btn primary" data-os="win" href="https://github.com/clipsearch-app/ClipSearch/releases/latest/download/ClipSearchSetup.exe">
+        <svg><use href="#dl"/></svg><span class="t"><b>Скачать для Windows</b><small>Установщик · 0,9 МБ</small></span></a>
+      <a class="btn ghost" data-os="mac" href="https://github.com/clipsearch-app/ClipSearch/releases/latest/download/ClipSearch-mac.dmg">
+        <svg><use href="#dl"/></svg><span class="t"><b>Скачать для Mac</b><small>macOS 11 и новее · DMG · 65 МБ</small></span></a>
       <a class="btn ghost" href="https://github.com/clipsearch-app/ClipSearch/releases/latest/download/ClipSearch-win32-x64.zip">
-        <svg><use href="#dl"/></svg><span class="t"><b>Без установки</b><small>Архив ZIP · 36 МБ</small></span></a>
+        <svg><use href="#dl"/></svg><span class="t"><b>Windows без установки</b><small>Архив ZIP · 36 МБ</small></span></a>
     </div>
     <p class="req center">Ключи Twitch и вход в аккаунт не нужны. Открытый код — на <a href="https://github.com/clipsearch-app/ClipSearch">GitHub</a>.</p>
   </section>
@@ -560,7 +568,8 @@ footer a { color: var(--muted); }
       <span class="kicker">Установка</span>
       <h2>Три шага <b>до первого клипа</b></h2>
     </div>
-    <div class="steps">
+    <div class="ostabs" role="tablist"><button type="button" data-ostab="win" class="on">Windows</button><button type="button" data-ostab="mac">macOS</button></div>
+    <div class="steps" data-os="win">
       <div class="step glass">
         <span class="n" aria-hidden="true"></span>
         <h3>Скачайте установщик</h3>
@@ -578,6 +587,24 @@ footer a { color: var(--muted); }
         <p>Впишите стримера, выберите период и нажмите «Искать». Внизу слева горит «Twitch подключён» — значит, всё работает.</p>
       </div>
     </div>
+    <div class="steps" data-os="mac" hidden>
+      <div class="step glass">
+        <span class="n" aria-hidden="true"></span>
+        <h3>Скачайте DMG</h3>
+        <p>Файл <b>ClipSearch-mac.dmg</b> подходит для любого Mac: и на Apple Silicon (M1 и новее), и на Intel. Нужна macOS 11 или новее.</p>
+      </div>
+      <div class="step glass">
+        <span class="n" aria-hidden="true"></span>
+        <h3>Перенесите в «Программы»</h3>
+        <p>Откройте DMG, перетащите ClipSearch в папку «Программы» и запустите его оттуда.</p>
+        <p class="warn">При первом запуске macOS скажет, что не может проверить разработчика. Нажмите <b>Готово</b>, откройте <b>Системные настройки → Конфиденциальность и безопасность</b> и нажмите <b>Всё равно открыть</b>. Это нужно один раз: так macOS встречает программы без платной подписи Apple.</p>
+      </div>
+      <div class="step glass">
+        <span class="n" aria-hidden="true"></span>
+        <h3>Ищите клипы</h3>
+        <p>Впишите стримера, выберите период и нажмите «Искать». Внизу слева горит «Twitch подключён» — значит, всё работает.</p>
+      </div>
+    </div>
   </section>
 
   <section id="versions">
@@ -586,7 +613,9 @@ footer a { color: var(--muted); }
       <h2>История <b>версий</b></h2>
     </div>
     <div class="log glass">
-      <div class="ver"><b>1.0</b><span>24 октября 2026</span><span class="now">Текущая</span></div>
+      <div class="ver"><b>1.1</b><span>24 октября 2026</span><span class="now">Текущая</span></div>
+      <div><ul><li>ClipSearch для macOS: Apple Silicon (M1 и новее) и Intel, macOS 11 и новее.</li><li>Установщик для Windows ставит именно ту версию, которую вы скачали.</li><li>Мелкие исправления.</li></ul></div>
+      <div class="ver"><b>1.0</b><span>24 октября 2026</span></div>
       <div><ul><li>Первый публичный выпуск ClipSearch.</li><li>Поиск по стримерам, категориям, авторам и словам из названия за любой период, график «Когда сняты клипы».</li><li>Скачивание в 1080p, 720p или 480p, вырезание фрагмента во встроенном плеере, очередь загрузок.</li><li>Русский и английский язык интерфейса, кнопка Telegram-канала.</li><li>Обновления внутри программы.</li></ul></div>
     </div>
   </section>
@@ -600,7 +629,7 @@ footer a { color: var(--muted); }
       <details class="glass"><summary>Это бесплатно?</summary><p>Да. Ни подписок, ни рекламы.</p></details>
       <details class="glass"><summary>Нужен аккаунт Twitch?</summary><p>Нет. Входить в Twitch и вводить ключи не нужно: программа ищет публичные клипы.</p></details>
       <details class="glass"><summary>Куда сохраняются клипы?</summary><p>В папку, которую вы выберете в разделе «Загрузки». Её можно открыть или сменить прямо из программы.</p></details>
-      <details class="glass"><summary>Есть версия для Mac или телефона?</summary><p>Приложение — только для Windows 10 и 11 (64-бит). Но искать клипы, смотреть и скачивать их по одному можно прямо на этом сайте с любого устройства.</p></details>
+      <details class="glass"><summary>Есть версия для Mac или телефона?</summary><p>Для Mac — да: macOS 11 и новее, Apple Silicon (M1 и новее) и Intel. Для телефона приложения нет, но искать клипы, смотреть и скачивать их по одному можно прямо на этом сайте с любого устройства.</p></details>
       <details class="glass"><summary>Как обновляться?</summary><p>Ничего скачивать заново не нужно: при выходе новой версии программа сама предложит обновиться. Проверить вручную можно кнопкой «Проверить обновления» внизу слева.</p></details>
       <details class="glass"><summary>Безопасно ли это?</summary><p>Код программы открыт на GitHub, а установщик и архив собираются там же автоматически. Программа не просит паролей и не трогает ваш аккаунт Twitch.</p></details>
     </div>
@@ -609,9 +638,11 @@ footer a { color: var(--muted); }
   <div class="final glass">
     <svg width="64" height="64" aria-hidden="true"><use href="#logo"/></svg>
     <h2>Найдите <b>свой клип</b> прямо сейчас</h2>
-    <div class="cta">
-      <a class="btn primary" href="https://github.com/clipsearch-app/ClipSearch/releases/latest/download/ClipSearchSetup.exe">
-        <svg><use href="#dl"/></svg><span class="t"><b>Скачать ClipSearch 1.0</b><small>Windows 10 и 11 · бесплатно</small></span></a>
+    <div class="cta dlpick">
+      <a class="btn primary" data-os="win" href="https://github.com/clipsearch-app/ClipSearch/releases/latest/download/ClipSearchSetup.exe">
+        <svg><use href="#dl"/></svg><span class="t"><b>Скачать для Windows</b><small>Windows 10 и 11 · бесплатно</small></span></a>
+      <a class="btn ghost" data-os="mac" href="https://github.com/clipsearch-app/ClipSearch/releases/latest/download/ClipSearch-mac.dmg">
+        <svg><use href="#dl"/></svg><span class="t"><b>Скачать для Mac</b><small>macOS 11 и новее · бесплатно</small></span></a>
       <a class="btn ghost tg" href="https://t.me/ClipSearch" target="_blank" rel="noopener"><svg><use href="#send"/></svg><span class="t"><b>Новости в Telegram</b><small>@ClipSearch</small></span></a>
     </div>
   </div>
@@ -642,7 +673,18 @@ footer a { color: var(--muted); }
 (function () {
   "use strict";
   const API = "https://api.clip-search.com";
-  const SETUP = "https://github.com/clipsearch-app/ClipSearch/releases/latest/download/ClipSearchSetup.exe";
+  const IS_MAC = /Macintosh|Mac OS X/.test(navigator.userAgent || "") && !(navigator.maxTouchPoints > 1);
+  const SETUP = IS_MAC ? "https://github.com/clipsearch-app/ClipSearch/releases/latest/download/ClipSearch-mac.dmg" : "https://github.com/clipsearch-app/ClipSearch/releases/latest/download/ClipSearchSetup.exe";
+  const DL_NOTE = IS_MAC ? "macOS 11 и новее · 65 МБ" : "Windows 10 и 11 · 0,9 МБ";
+  if (IS_MAC) document.querySelectorAll(".dlpick").forEach((c) => {
+    const w = c.querySelector('[data-os="win"]'), m = c.querySelector('[data-os="mac"]');
+    if (!w || !m) return;
+    c.insertBefore(m, w); m.classList.replace("ghost", "primary"); w.classList.replace("primary", "ghost");
+  });
+  const OSTABS = document.querySelectorAll("[data-ostab]");
+  const showOs = (os) => { OSTABS.forEach((b) => b.classList.toggle("on", b.dataset.ostab === os)); document.querySelectorAll(".steps[data-os]").forEach((s) => { s.hidden = s.dataset.os !== os; }); };
+  OSTABS.forEach((b) => b.addEventListener("click", () => showOs(b.dataset.ostab)));
+  if (OSTABS.length) showOs(IS_MAC ? "mac" : "win");
   const MAX_PAGES = 5, PAGE = 24;
   const LANG = document.documentElement.lang === "en" ? "en" : "ru", LOC = LANG === "en" ? "en-US" : "ru-RU";
   const $ = (id) => document.getElementById(id);
@@ -699,7 +741,7 @@ footer a { color: var(--muted); }
     const [title, text] = LOCKS[key] || ["Есть в приложении", ""];
     overlay(`<span class="badge">${IC.lock}Только в приложении ClipSearch</span><h3>${esc(title)}</h3><p>${esc(text)}</p>
       <p>На сайте этого нет: сайт работает в браузере и делит лимиты Twitch со всеми посетителями. Приложение бесплатное, ключи Twitch и вход не нужны.</p>
-      <div class="row2"><a class="btn primary" href="${SETUP}"><svg><use href="#dl"/></svg><span class="t"><b>Скачать ClipSearch</b><small>Windows 10 и 11 · 0,9 МБ</small></span></a>
+      <div class="row2"><a class="btn primary" href="${SETUP}"><svg><use href="#dl"/></svg><span class="t"><b>Скачать ClipSearch</b><small>${DL_NOTE}</small></span></a>
       <button type="button" class="ghostbtn" data-close>Понятно</button></div>`);
   }
   function showReport() {
