@@ -46,6 +46,7 @@ def L(ru, en):
 
 RELEASE_NOTES = """- Записи трансляций: скачивайте их целиком или вырезайте нужный кусок, в том числе у эфира, который ещё идёт.
 - Чат трансляции на записях: включите переключатель — и к скачанной записи добавится чат, каким он был в тот момент. Сообщения плавно появляются по ходу видео. Размер, высоту, положение и фон можно настроить, а в окне настроек сразу видно, как это будет выглядеть. Можно поверх видео или отдельным файлом с прозрачным фоном.
+- Фильтр «Субтитры» в поиске: только клипы с субтитрами Twitch или только без них.
 - ClipSearch теперь есть для macOS: Apple Silicon (M1 и новее) и Intel, macOS 11 и новее.
 - Установщик для Windows ставит именно ту версию, которую вы скачали.
 
@@ -53,6 +54,7 @@ RELEASE_NOTES = """- Записи трансляций: скачивайте и�
 ### English
 - Broadcast videos: download them whole or cut out the part you need, even from a stream that is still live.
 - Stream chat on broadcast videos: turn on the switch and the chat is added to the downloaded video as it was at that moment, with messages smoothly appearing as it plays. Size, height, position and background are adjustable, with a live preview in the settings. On top of the video or as a separate file with a transparent background.
+- “Captions” filter in search: only clips with Twitch captions or only without them.
 - ClipSearch is now available for macOS: Apple Silicon (M1 and newer) and Intel, macOS 11 or later.
 - The Windows installer now installs exactly the version you downloaded."""
 GITHUB_API = os.environ.get("CLIPS_GITHUB_API", "https://api.github.com")
@@ -299,8 +301,36 @@ def make_windows(start, end, deep):
         cur = lo
     return windows
 
+def clip_captions(slugs, cancel=None, progress=None):
+    from concurrent.futures import ThreadPoolExecutor
+    batches = [slugs[i:i + 15] for i in range(0, len(slugs), 15)]
+    out, done = {}, [0]
+    lock = threading.Lock()
+    def one(part):
+        if cancel is not None and cancel.is_set():
+            return
+        q = "query { " + " ".join(f"c{j}: clip(slug: {json.dumps(sl)}) {{ hasCaptions }}" for j, sl in enumerate(part)) + " }"
+        try:
+            data = gql_post({"query": q}).get("data") or {}
+        except Exception as e:
+            log(f"captions: {e!r}")
+            data = {}
+        with lock:
+            for j, sl in enumerate(part):
+                c = data.get(f"c{j}")
+                if isinstance(c, dict) and isinstance(c.get("hasCaptions"), bool):
+                    out[sl] = c["hasCaptions"]
+            done[0] += len(part)
+            if progress:
+                progress(done[0], len(slugs))
+    with ThreadPoolExecutor(4) as ex:
+        list(ex.map(one, batches))
+    if cancel is not None and cancel.is_set():
+        raise Cancelled()
+    return out
+
 def search_clips(tw, login="", game_id="", words="", start=None, end=None, creator="", min_views=0,
-                 max_pages=10, deep=False, progress=None, cancel=None, game_names=None):
+                 max_pages=10, deep=False, progress=None, cancel=None, game_names=None, captions=""):
     logins = [login] if isinstance(login, str) else list(login or [])
     logins = [l for l in logins if l]
     gids = [game_id] if isinstance(game_id, str) else list(game_id or [])
@@ -390,6 +420,12 @@ def search_clips(tw, login="", game_id="", words="", start=None, end=None, creat
         if len(found) >= MAX_RESULTS:
             break
 
+    cc_unknown = 0
+    if captions in ("yes", "no") and found:
+        cc_prog = (lambda d, n: progress({"scanned": scanned, "found": len(found), "frac": 0.95 + 0.04 * d / max(1, n), "cc": [d, n]})) if progress else None
+        cc = clip_captions([c["id"] for c in found], cancel, cc_prog)
+        cc_unknown = sum(1 for c in found if c["id"] not in cc)
+        found = [c for c in found if cc.get(c["id"]) is (captions == "yes")]
     found.sort(key=lambda c: c.get("view_count", 0), reverse=True)
     games = tw.games([c.get("game_id") for c in found], cancel)
     rows = []
@@ -410,7 +446,7 @@ def search_clips(tw, login="", game_id="", words="", start=None, end=None, creat
             "duration": float(c.get("duration", 0)),
             "thumb": c.get("thumbnail_url", ""),
         })
-    return rows, {"scanned": scanned, "truncated": truncated}
+    return rows, {"scanned": scanned, "truncated": truncated, "captions": captions if captions in ("yes", "no") else "", "cc_unknown": cc_unknown}
 
 QUALITIES = ("1080", "720", "480")
 
@@ -2407,6 +2443,9 @@ input, textarea, .errmsg { user-select: text; -webkit-user-select: text; }
 .chatopt { display: grid; gap: 8px; justify-items: start; }
 .trim .chatopt { margin-top: 12px; }
 .cmodes { display: flex; flex-wrap: wrap; gap: 6px; }
+.ccseg { gap: 6px; flex-wrap: nowrap; }
+.ccseg .chip { height: 38px; padding: 0 14px; font-size: 13.5px; }
+.ccseg .lbl { font-size: 13px; }
 .cmodes .chip { height: 30px; padding: 0 12px; font-size: 12.5px; }
 .vod-list { display: grid; gap: 12px; }
 .vd { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 16px; padding: 12px; border-radius: var(--radius-md); background: var(--panel); border: 1px solid var(--line); animation: lvrise .4s var(--ease, ease) both; animation-delay: var(--d, 0s); }
@@ -2572,6 +2611,7 @@ input[type=range].rg:disabled { opacity: .4; }
             <button class="btn danger" id="stop" hidden>Остановить</button>
             <button class="btn ghostbtn" id="reset" title="Очистить все поля и вернуть период «7 дней»">Сбросить</button>
             <button class="switch" id="deep" role="switch" aria-checked="false" title="Период режется на недельные куски: находит больше старых и непопулярных клипов, но поиск идёт дольше"><span class="tr"></span>Глубокий поиск</button>
+            <div class="seg solid ccseg" id="ccSeg" title="Субтитры Twitch на клипе: автоматические или добавленные стримером"><span class="lbl">Субтитры</span><button class="chip on" type="button" data-cc="">Любые</button><button class="chip" type="button" data-cc="yes">Есть</button><button class="chip" type="button" data-cc="no">Нет</button></div>
             <span class="hint" id="goHint"></span>
           </div>
         </div>
@@ -2835,7 +2875,7 @@ const EN = {
   "Скачать клип": "Download the clip", "Скачать все выбранные": "Download all selected", "Скопировать ссылку на клип": "Copy the clip link",
   "Меню клипа (как правый клик)": "Clip menu (like right-click)", "Перейти к полю «Стример»": "Go to the “Streamer” field", "Показать эту подсказку": "Show this help",
   "Закрыть меню и окна": "Close menus and windows", "Сначала выберите клипы": "Select clips first", "Выбор снят": "Selection cleared",
-  "Enter в любом поле запускает поиск": "Enter in any field starts the search", "Telegram-канал": "Telegram channel", "Язык": "Language",
+  "Enter в любом поле запускает поиск": "Enter in any field starts the search", "Enter запускает поиск. В полях стримера и автора Enter сначала добавляет ник в список": "Enter starts the search. In the streamer and author fields, Enter first adds the name to the list", "Telegram-канал": "Telegram channel", "Язык": "Language",
   "Обновлений нет.": "No updates.", "Неверный клип.": "Invalid clip.", "Не выбрано ни одного клипа.": "No clips selected.", "Неизвестная команда.": "Unknown command.",
   "Можно открывать только ссылки Twitch.": "Only Twitch links can be opened.", "Файл не найден: возможно, его переместили или удалили.": "File not found: it may have been moved or deleted.",
   "Укажите стримера или категорию (можно и то и другое).": "Enter a streamer or a category (or both).", "Дата «с» должна быть раньше даты «по».": "The “from” date must be earlier than the “to” date.",
@@ -2892,7 +2932,8 @@ const RULES = [
   [/^Не удалось получить ссылку на скачивание клипа (.+)\.$/, "Couldn’t get a download link for clip $1."], [/^Неожиданная ошибка: (.*)$/, "Unexpected error: $1"],
   [/^Слишком много запросов, подождите минуту\.$/, "Too many requests, please wait a minute."],
 ];
-Object.assign(EN, {"Чат на видео": "Chat on video", "Пример": "Example", "Как добавить": "How to add", "Поверх видео": "On the video", "Угол": "Corner", "Положение": "Position", "Слева по центру": "Middle left", "Справа по центру": "Middle right", "Слева сверху": "Top left", "Справа сверху": "Top right", "Слева снизу": "Bottom left", "Справа снизу": "Bottom right", "Размер": "Size", "Высота": "Height", "Фон": "Background", "Есть": "On", "Плотность фона": "Background density", "Сбросить": "Reset", "Готово": "Done", "Настроить чат: размер, фон, положение": "Chat settings: size, background, position"});
+Object.assign(EN, {"Субтитры": "Captions", "Любые": "Any", "Есть": "With", "Нет": "Without", "Субтитры Twitch на клипе: автоматические или добавленные стримером": "Twitch captions on the clip: automatic or added by the streamer"});
+Object.assign(EN, {"Чат на видео": "Chat on video", "Пример": "Example", "Как добавить": "How to add", "Поверх видео": "On the video", "Угол": "Corner", "Положение": "Position", "Слева по центру": "Middle left", "Справа по центру": "Middle right", "Слева сверху": "Top left", "Справа сверху": "Top right", "Слева снизу": "Bottom left", "Справа снизу": "Bottom right", "Размер": "Size", "Высота": "Height", "Фон": "Background", "Плотность фона": "Background density", "Сбросить": "Reset", "Готово": "Done", "Настроить чат: размер, фон, положение": "Chat settings: size, background, position"});
 Object.assign(EN, {"Чат трансляции": "Stream chat", "Справа": "Right", "Слева": "Left", "Отдельным файлом": "Separate file", "Добавить к видео чат трансляции — каким он был в этот момент. Чат берётся из записи эфира.": "Add the stream chat to the video — as it was at that moment. The chat comes from the broadcast video."});
 Object.assign(EN, {"Эфир": "Live", "Записи": "Videos", "Клипы из": "Clips from the", "эфира": "stream", "Добавьте стримера — приложение будет держать в памяти последние минуты трансляции вместе со звуком, даже если там играет музыка. Случился момент — нажмите «Клип».": "Add a streamer — the app keeps the last minutes of the broadcast in memory with the sound, even when music is playing. When the moment happens, press “Clip”.", "Ник стримера или ссылка на канал": "Streamer name or channel link", "Следить за эфиром": "Watch the stream", "Держать в памяти": "Keep in memory", "2 мин": "2 min", "5 мин": "5 min", "10 мин": "10 min", "15 мин": "15 min", "Качество": "Quality", "Пока канал в списке, приложение смотрит эфир в фоне: трафик как при обычном просмотре, около 3 ГБ в час в 1080p. Рекламные вставки Twitch в клипы не попадают.": "While a channel is on the list, the app watches the stream in the background: traffic is like normal viewing, about 3 GB per hour in 1080p. Twitch ad breaks don’t end up in clips.", "Здесь появятся эфиры": "Streams will appear here", "Впишите стримера и нажмите «Следить за эфиром». Можно следить за четырьмя каналами сразу.": "Enter a streamer and press “Watch the stream”. You can watch four channels at once.", "трансляций": "of past streams", "Скачайте запись эфира целиком или вырежьте нужный кусок — даже у эфира, который ещё идёт. Видео качается прямо с Twitch.": "Download a whole broadcast or cut out the part you need — even from a stream that is still live. The video downloads straight from Twitch.", "Ник стримера или ссылка на запись (twitch.tv/videos/…)": "Streamer name or video link (twitch.tv/videos/…)", "Найти записи": "Find videos", "Показывать": "Show", "Трансляции": "Broadcasts", "Хайлайты": "Highlights", "Загруженные": "Uploads", "Здесь появятся записи": "Videos will appear here", "Впишите стримера — покажем его последние трансляции. Или вставьте ссылку на конкретную запись.": "Enter a streamer to see their recent broadcasts. Or paste a link to a specific video.", "Клип из эфира": "Live clip", "Начало клипа": "Clip start", "Конец клипа": "Clip end", "сейчас": "now", "Начало:": "Start:", "Конец:": "End:", "Длина клипа:": "Clip length:", "Отмена": "Cancel", "Сохранить клип": "Save clip", "Узнаю длину записи и доступные качества…": "Checking the video length and available qualities…", "Отрезок": "Range", "Целиком": "Whole", "Начало отрезка": "Range start", "Конец отрезка": "Range end", "Скачать": "Download"});
 function tr(s) {
@@ -3200,7 +3241,7 @@ $("login").addEventListener("keydown", (e) => {
   if (e.key === "Backspace" && !$("login").value && S.logins.length) { S.logins.pop(); paintChips(); }
 });
 $("login").addEventListener("blur", commitLogin);
-$("login").addEventListener("keydown", (e) => { if (e.key === "Enter") startSearch(); });
+$("login").addEventListener("keydown", (e) => { if (e.key !== "Enter") return; e.preventDefault(); if ($("login").value.trim()) commitLogin(); else startSearch(); });
 $("fLogin").querySelector(".x").addEventListener("click", () => setLogins(""));
 
 const P = { row: null, dur: 0, a: 0, b: 0, preview: false, drag: null };
@@ -3290,6 +3331,8 @@ addEventListener("keydown", (e) => {
   inp.addEventListener("keydown", (e) => { if (e.key === "Enter") startSearch(); });
 });
 
+function setCc(v) { S.cc = v; document.querySelectorAll("#ccSeg [data-cc]").forEach((c) => c.classList.toggle("on", c.dataset.cc === v)); }
+$("ccSeg").addEventListener("click", (e) => { const c = e.target.closest("[data-cc]"); if (c) setCc(c.dataset.cc); });
 const MAXC = 10;
 const XB = (i, name) => `<button type="button" data-rm="${i}" aria-label="Убрать ${esc(name)}"><svg class="i" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button>`;
 S.cats = []; S.creators = [];
@@ -3334,7 +3377,7 @@ $("creator").addEventListener("input", () => {
 });
 $("creator").addEventListener("keydown", (e) => {
   if (e.key === "Backspace" && !$("creator").value && S.creators.length) { S.creators.pop(); paintCreators(); }
-  if (e.key === "Enter") startSearch();
+  if (e.key === "Enter") { e.preventDefault(); if ($("creator").value.trim()) commitCreator(); else startSearch(); }
 });
 $("creator").addEventListener("blur", commitCreator);
 $("fCreator").querySelector(".x").addEventListener("click", () => { setCreators([]); $("creator").focus(); });
@@ -3392,10 +3435,10 @@ async function startSearch() {
   const body = {
     login, categories: cats, creators,
     words: $("words").value, min_views: parseInt($("minViews").value, 10) || 0,
-    pages: 10, deep: $("deep").getAttribute("aria-checked") === "true",
+    pages: 10, deep: $("deep").getAttribute("aria-checked") === "true", captions: S.cc || "",
     start: start ? start.toISOString() : null, end: end ? end.toISOString() : null,
   };
-  api("/api/settings", { last: { login, cats: S.cats.slice(), creators, words: $("words").value, period: serPeriod() } });
+  api("/api/settings", { last: { login, cats: S.cats.slice(), creators, words: $("words").value, period: serPeriod(), cc: S.cc || "" } });
   setBusy(true); S.selected.clear(); S.rows = []; S.multi = logins.length > 1; paintSel(); stopPreview();
   S.lastSearch = { logins, cats: S.cats.slice() };
   $("resHead").hidden = false; moveGlide($("sorts")); $("resTitle").textContent = "Ищу…"; $("resStatus").textContent = "Подключаюсь к Twitch";
@@ -3428,7 +3471,7 @@ function fmtDur(sec) {
 function updSearching(p, t0) {
   if (!$("sNum")) return;
   if (!p || typeof p !== "object") { $("sNum").textContent = p || "Подключаюсь к Twitch"; return; }
-  $("sNum").textContent = `Просмотрено клипов: ${p.scanned.toLocaleString(LOC)} · найдено: ${p.found.toLocaleString(LOC)}`;
+  $("sNum").textContent = p.cc ? `Проверяю субтитры у найденных клипов: ${p.cc[0].toLocaleString(LOC)} из ${p.cc[1].toLocaleString(LOC)}` : `Просмотрено клипов: ${p.scanned.toLocaleString(LOC)} · найдено: ${p.found.toLocaleString(LOC)}`;
   const frac = Math.min(0.99, p.frac || 0), el = (Date.now() - t0) / 1000;
   $("sBar").style.width = Math.max(4, Math.round(frac * 100)) + "%";
   $("sEta").textContent = frac >= 0.06 && el >= 2 ? "Осталось примерно: " + fmtDur(el * (1 - frac) / frac) + (p.steps > 1 ? ` (период ${p.step} из ${p.steps})` : "") : "Считаю, сколько осталось…";
@@ -3447,6 +3490,8 @@ function done(res) {
   $("resTitle").textContent = n ? `Найдено ${n.toLocaleString(LOC)} ${plural(n, ["клип", "клипа", "клипов"])}` : "Ничего не найдено";
   let st = `${periodText()}. Просмотрено клипов: ${res.info.scanned.toLocaleString(LOC)}.`;
   if (res.info.truncated) st += " Часть клипов не просмотрена: сузьте период или включите глубокий поиск.";
+  if (res.info.captions) st += res.info.captions === "yes" ? " Только клипы с субтитрами." : " Только клипы без субтитров.";
+  if (res.info.cc_unknown) st += ` У ${res.info.cc_unknown.toLocaleString(LOC)} клипов Twitch не ответил про субтитры — они не показаны.`;
   $("resStatus").textContent = st;
   sortRows(); S.shown = 0; $("list").innerHTML = ""; renderMore(); drawChart(); moveGlide($("sorts"));
   if (!n) $("list").innerHTML = `<div class="empty"><div class="big"><svg class="i" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5M8.5 11h5"/></svg></div><h3>Ничего не нашлось</h3><p>Расширьте период, уберите часть слов или включите глубокий поиск.</p></div>`;
@@ -3456,7 +3501,7 @@ $("reset").addEventListener("click", () => {
   if ($("go").disabled) return;
   ["login", "cat", "words", "creator", "minViews"].forEach((id) => { $(id).value = ""; $(id).dispatchEvent(new Event("input")); });
   $("sug").hidden = true; setLogins(""); setCats([]); setCreators([]);
-  $("deep").setAttribute("aria-checked", "false");
+  $("deep").setAttribute("aria-checked", "false"); setCc("");
   S.period = { kind: "preset", key: "7d" }; paintPeriod(); closePop(); showAlert("");
   api("/api/settings", { last: { login: "", cats: [], creators: [], words: "", period: serPeriod() } });
   $("login").focus();
@@ -4603,10 +4648,11 @@ addEventListener("keydown", (e) => {
   setLogins(l.login || ""); $("words").value = l.words || "";
   setCats(Array.isArray(l.cats) ? l.cats : l.category ? [{ name: l.category }] : []);
   setCreators(Array.isArray(l.creators) ? l.creators : l.creator || "");
+  setCc(l.cc === "yes" || l.cc === "no" ? l.cc : "");
   paintedCats = new Set(S.cats.map((c) => c.name)); paintedCr = new Set(S.creators); paintCats(); paintCreators();
   ["login", "words"].forEach((id) => $(id).dispatchEvent(new Event("input")));
   loadPeriod(l.period); paintPeriod(); loadFolder();
-  $("goHint").textContent = "Enter в любом поле запускает поиск";
+  $("goHint").textContent = "Enter запускает поиск. В полях стримера и автора Enter сначала добавляет ник в список";
   setTimeout(() => checkUpdate(false), 2500);
   pollDownloads();
 })();
@@ -5292,6 +5338,7 @@ def make_handler(ctx):
                 words=str(b.get("words", "")), start=start, end=end, creator=creators,
                 min_views=max(0, int(b.get("min_views") or 0)),
                 max_pages=min(50, max(1, int(b.get("pages") or 10))), deep=bool(b.get("deep")),
+                captions=b.get("captions") if b.get("captions") in ("yes", "no") else "",
             )
             if not login and not cats_req:
                 raise ValueError("Укажите стримера или категорию (можно и то и другое).")

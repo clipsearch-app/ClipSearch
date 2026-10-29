@@ -110,7 +110,7 @@ h1 em { font-style: normal; font-weight: 700;
 .win { position: relative; border-radius: 18px; overflow: hidden; border: 1px solid var(--glass-edge);
   box-shadow: 0 40px 90px rgba(0, 0, 0, .55), 0 0 0 1px rgba(0, 0, 0, .3);
   transform: rotateX(var(--rx, 10deg)) rotateY(var(--ry, 0deg)); transform-origin: 50% 80%; transition: transform .6s var(--ease);
-  animation: rise 1.1s var(--ease) both; }
+  animation: rise 1.1s var(--ease) backwards; }
 .win img { display: block; width: 100%; height: auto; max-width: 100%; aspect-ratio: 1600 / 1019; }
 .win .shine { position: absolute; inset: 0; pointer-events: none;
   background: radial-gradient(600px 300px at var(--mx, 30%) var(--my, 0%), rgba(255, 255, 255, .10), transparent 60%); }
@@ -723,7 +723,7 @@ footer a { color: var(--muted); }
     </div>
     <div class="log glass">
       <div class="ver"><b>1.1</b><span>29 октября 2026</span><span class="now">Текущая</span></div>
-      <div><ul><li>Записи трансляций: скачивайте их целиком или вырезайте нужный кусок, в том числе у эфира, который ещё идёт.</li><li>Чат трансляции на записях: включите переключатель — и к скачанной записи добавится чат, каким он был в тот момент. Сообщения плавно появляются по ходу видео, а размер, положение и фон можно настроить.</li><li>ClipSearch для macOS: Apple Silicon (M1 и новее) и Intel, macOS 11 и новее.</li><li>Установщик для Windows ставит именно ту версию, которую вы скачали.</li></ul></div>
+      <div><ul><li>Записи трансляций: скачивайте их целиком или вырезайте нужный кусок, в том числе у эфира, который ещё идёт.</li><li>Чат трансляции на записях: включите переключатель — и к скачанной записи добавится чат, каким он был в тот момент. Сообщения плавно появляются по ходу видео, а размер, положение и фон можно настроить.</li><li>Фильтр «Субтитры» в поиске: только клипы с субтитрами Twitch или только без них.</li><li>ClipSearch для macOS: Apple Silicon (M1 и новее) и Intel, macOS 11 и новее.</li><li>Установщик для Windows ставит именно ту версию, которую вы скачали.</li></ul></div>
       <div class="ver"><b>1.0</b><span>24 октября 2026</span></div>
       <div><ul><li>Первый публичный выпуск ClipSearch.</li><li>Поиск по стримерам, категориям, авторам и словам из названия за любой период, график «Когда сняты клипы».</li><li>Скачивание в 1080p, 720p или 480p, вырезание фрагмента во встроенном плеере, очередь загрузок.</li><li>Русский и английский язык интерфейса, кнопка Telegram-канала.</li><li>Обновления внутри программы.</li></ul></div>
     </div>
