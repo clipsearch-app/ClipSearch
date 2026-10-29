@@ -44,15 +44,17 @@ def L(ru, en):
     return en if LANG["code"] == "en" else ru
 
 
-RELEASE_NOTES = """- ClipSearch теперь есть для macOS: Apple Silicon (M1 и новее) и Intel, macOS 11 и новее.
+RELEASE_NOTES = """- Клипы из эфира: приложение держит в памяти последние минуты трансляции вместе со звуком — сохраняйте момент одной кнопкой.
+- Записи трансляций: скачивайте их целиком или вырезайте нужный кусок, в том числе у эфира, который ещё идёт.
+- ClipSearch теперь есть для macOS: Apple Silicon (M1 и новее) и Intel, macOS 11 и новее.
 - Установщик для Windows ставит именно ту версию, которую вы скачали.
-- Мелкие исправления.
 
 <!-- en -->
 ### English
+- Live clips: the app keeps the last minutes of a broadcast in memory with the sound — save the moment with one button.
+- Broadcast videos: download them whole or cut out the part you need, even from a stream that is still live.
 - ClipSearch is now available for macOS: Apple Silicon (M1 and newer) and Intel, macOS 11 or later.
-- The Windows installer now installs exactly the version you downloaded.
-- Minor fixes."""
+- The Windows installer now installs exactly the version you downloaded."""
 GITHUB_API = os.environ.get("CLIPS_GITHUB_API", "https://api.github.com")
 
 WORKER_URL = os.environ.get("CLIPS_WORKER_URL", "https://api.clip-search.com").rstrip("/")
@@ -572,6 +574,567 @@ import socketserver
 import subprocess
 import http.server
 
+USHER_URL = os.environ.get("CLIPS_USHER_URL", "https://usher.ttvnw.net").rstrip("/")
+WEB_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36"
+TOKEN_QUERY = """query PlaybackAccessToken($login: String!, $isLive: Boolean!, $vodID: ID!, $isVod: Boolean!, $playerType: String!) {
+  streamPlaybackAccessToken(channelName: $login, params: {platform: "web", playerBackend: "mediaplayer", playerType: $playerType}) @include(if: $isLive) { value signature }
+  videoPlaybackAccessToken(id: $vodID, params: {platform: "web", playerBackend: "mediaplayer", playerType: $playerType}) @include(if: $isVod) { value signature }
+}"""
+LIVE_KEEP = (2, 5, 10, 15)
+LIVE_QUALITIES = ("1080", "720", "480")
+VOD_QUALITIES = ("1080", "720", "480", "360", "audio")
+PRECISE_LIMIT = 20 * 60
+
+
+def hls_attrs(line):
+    body = line.split(":", 1)[1] if ":" in line else ""
+    return {k: v.strip('"') for k, v in re.findall(r'([A-Z0-9-]+)=("[^"]*"|[^,]*)', body)}
+
+
+def parse_pdt(s):
+    try:
+        return datetime.fromisoformat(str(s).strip().replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return None
+
+
+def web_get(url, timeout=20, cancel=None, tries=3):
+    last = None
+    for a in range(tries):
+        if cancel is not None and cancel.is_set():
+            raise Cancelled()
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": WEB_UA}), timeout=timeout) as r:
+                return r.read()
+        except urllib.error.HTTPError as e:
+            if e.code in (400, 401, 403, 404, 410):
+                raise
+            last = e
+        except Exception as e:
+            last = e
+        if a + 1 < tries:
+            time.sleep(0.6 + a)
+    raise TwitchError(L(f"Нет связи с Twitch: {getattr(last, 'reason', last)}", f"No connection to Twitch: {getattr(last, 'reason', last)}"))
+
+
+def playback_token(login="", vod_id=""):
+    body = json.dumps({"operationName": "PlaybackAccessToken", "query": TOKEN_QUERY, "variables": {
+        "login": login or "", "isLive": bool(login), "vodID": str(vod_id or ""), "isVod": bool(vod_id), "playerType": "site"}}).encode()
+    req = urllib.request.Request(GQL_URL, data=body, headers={"Client-Id": GQL_CLIENT_ID, "Content-Type": "application/json", "User-Agent": WEB_UA})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            d = json.load(r)
+    except Exception as e:
+        raise TwitchError(L(f"Twitch не выдал доступ к видео: {getattr(e, 'reason', e)}", f"Twitch did not grant access to the video: {getattr(e, 'reason', e)}"))
+    t = (d.get("data") or {}).get("streamPlaybackAccessToken" if login else "videoPlaybackAccessToken") or {}
+    if not t.get("value"):
+        raise TwitchError(L("Twitch не выдал доступ к видео.", "Twitch did not grant access to the video."))
+    return t["value"], t["signature"]
+
+
+def usher_query(tok, sig):
+    return urllib.parse.urlencode({"sig": sig, "token": tok, "allow_source": "true", "allow_audio_only": "true", "fast_bread": "true",
+                                   "p": secrets.randbelow(9999999), "player": "twitchweb", "playlist_include_framerate": "true",
+                                   "supported_codecs": "avc1"})
+
+
+def parse_master(text, base):
+    names, out, inf = {}, [], None
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("#EXT-X-MEDIA:"):
+            a = hls_attrs(line)
+            names[a.get("GROUP-ID", "")] = a.get("NAME", "")
+        elif line.startswith("#EXT-X-STREAM-INF:"):
+            inf = hls_attrs(line)
+        elif line and not line.startswith("#") and inf is not None:
+            res = inf.get("RESOLUTION", "")
+            h = int(res.split("x")[1]) if "x" in res else 0
+            gid = inf.get("VIDEO", "")
+            try:
+                fps = round(float(inf.get("FRAME-RATE") or 0))
+            except ValueError:
+                fps = 0
+            out.append({"url": urllib.parse.urljoin(base, line), "height": h, "fps": fps,
+                        "name": (names.get(gid) or gid).replace(" (source)", ""), "audio": gid == "audio_only" or not h,
+                        "bw": int(inf.get("BANDWIDTH") or 0)})
+            inf = None
+    return out
+
+
+def pick_variant(vs, quality):
+    vids = sorted([v for v in vs if not v["audio"]], key=lambda v: (v["height"], v["fps"], v["bw"]), reverse=True)
+    if quality == "audio":
+        a = [v for v in vs if v["audio"]]
+        if a:
+            return a[0]
+    if not vids:
+        if vs:
+            return vs[0]
+        raise TwitchError(L("Twitch не отдал список качеств видео.", "Twitch did not return the video qualities."))
+    try:
+        q = int(quality)
+    except (TypeError, ValueError):
+        return vids[0]
+    fit = [v for v in vids if v["height"] <= q + 1]
+    return fit[0] if fit else vids[-1]
+
+
+def parse_media(text, base):
+    segs, seq, dur, title, pdt, init, ended, ads = [], 0, None, "", None, None, False, []
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("#EXT-X-MEDIA-SEQUENCE:"):
+            seq = int(line.split(":", 1)[1] or 0)
+        elif line.startswith("#EXT-X-MAP:"):
+            init = urllib.parse.urljoin(base, hls_attrs(line).get("URI", ""))
+        elif line.startswith("#EXT-X-PROGRAM-DATE-TIME:"):
+            pdt = parse_pdt(line.split(":", 1)[1])
+        elif line.startswith("#EXT-X-DATERANGE:"):
+            a = hls_attrs(line)
+            if "stitched-ad" in a.get("CLASS", "") or a.get("ID", "").startswith("stitched-ad"):
+                st = parse_pdt(a.get("START-DATE", ""))
+                if st is not None:
+                    try:
+                        ads.append((st, st + float(a.get("DURATION") or 0)))
+                    except ValueError:
+                        pass
+        elif line.startswith("#EXTINF:"):
+            d, _, title = line[8:].partition(",")
+            try:
+                dur = float(d or 0)
+            except ValueError:
+                dur = 0.0
+        elif line.startswith("#EXT-X-ENDLIST"):
+            ended = True
+        elif line and not line.startswith("#") and dur is not None:
+            segs.append({"seq": seq, "url": urllib.parse.urljoin(base, line), "dur": dur, "title": title.strip(), "pdt": pdt,
+                         "muted": "-muted" in line or "-unmuted" in line})
+            seq += 1
+            dur, title, pdt = None, "", None
+    for s in segs:
+        by_title = bool(s["title"]) and "live" not in s["title"].lower()
+        by_range = s["pdt"] is not None and any(a <= s["pdt"] < b - 0.05 for a, b in ads)
+        s["ad"] = by_title or by_range
+    return {"segs": segs, "ended": ended, "init": init}
+
+
+def seg_bytes(url, cancel=None):
+    try:
+        return web_get(url, timeout=40, cancel=cancel)
+    except urllib.error.HTTPError as e:
+        if e.code == 403 and "-unmuted" in url:
+            return web_get(url.replace("-unmuted", "-muted"), timeout=40, cancel=cancel)
+        raise TwitchError(L(f"Twitch не отдал кусок видео (ответ {e.code}).", f"Twitch did not return a video piece (response {e.code})."))
+
+
+def fetch_ordered(urls, cancel=None, workers=4):
+    from concurrent.futures import ThreadPoolExecutor
+    urls = list(urls)
+    with ThreadPoolExecutor(workers) as ex:
+        futs = [ex.submit(seg_bytes, u, cancel) for u in urls[: workers * 2]]
+        nxt = len(futs)
+        while futs:
+            data = futs.pop(0).result()
+            if nxt < len(urls):
+                futs.append(ex.submit(seg_bytes, urls[nxt], cancel))
+                nxt += 1
+            yield data
+
+
+def hms(sec):
+    sec = int(round(sec))
+    h, m, s = sec // 3600, sec % 3600 // 60, sec % 60
+    return f"{h}h{m:02d}m{s:02d}s" if h else f"{m}m{s:02d}s"
+
+
+def clock(sec):
+    sec = int(round(sec))
+    h, m, s = sec // 3600, sec % 3600 // 60, sec % 60
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+def segments_to_file(chunks, dst, n, offset=0.0, duration=None, precise=False, audio=False, cancel=None, progress=None, fmp4=False):
+    ff = find_ffmpeg()
+    if not ff:
+        raise TwitchError(L("Не найден ffmpeg рядом с программой. Переустановите ClipSearch.", "ffmpeg was not found next to the app. Reinstall ClipSearch."))
+    if fmp4:
+        src = dst + ".src.mp4"
+        try:
+            with open(src, "wb") as f:
+                for i, data in enumerate(chunks):
+                    if cancel is not None and cancel.is_set():
+                        raise Cancelled()
+                    f.write(data)
+                    if progress:
+                        progress(min(99, (i + 1) * 70 // max(1, n)))
+            return segments_to_file(iter(()), dst, 1, offset, duration, precise, audio, cancel, None, fmp4=None)
+        finally:
+            try:
+                os.remove(src)
+            except OSError:
+                pass
+    cmd = [ff, "-hide_banner", "-y", "-loglevel", "error", "-fflags", "+genpts+discardcorrupt"]
+    if precise and offset > 0.01:
+        cmd += ["-ss", f"{offset:.3f}"]
+    if fmp4 is None:
+        cmd += ["-i", dst + ".src.mp4"]
+        chunks = iter(())
+    else:
+        cmd += ["-f", "mpegts", "-i", "pipe:0"]
+    if duration:
+        cmd += ["-t", f"{duration:.3f}"]
+    if audio:
+        cmd += ["-map", "0:a:0", "-vn"]
+    else:
+        cmd += ["-map", "0:v:0?", "-map", "0:a:0?"]
+    if precise and not audio:
+        cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k"]
+    elif precise:
+        cmd += ["-c:a", "aac", "-b:a", "192k"]
+    else:
+        cmd += ["-c", "copy", "-bsf:a", "aac_adtstoasc"]
+    cmd += ["-movflags", "+faststart", "-f", "mp4", dst]
+    flags = 0x08000000 if os.name == "nt" else 0
+    pr = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, creationflags=flags)
+    err = []
+    threading.Thread(target=lambda: err.extend(pr.stderr.read().decode("utf-8", "replace").splitlines()[-6:]), daemon=True).start()
+    broken = False
+    try:
+        for i, data in enumerate(chunks):
+            if cancel is not None and cancel.is_set():
+                raise Cancelled()
+            try:
+                pr.stdin.write(data)
+            except (BrokenPipeError, OSError):
+                broken = True
+                break
+            if progress:
+                progress(min(99, (i + 1) * (93 if precise else 99) // max(1, n)))
+        try:
+            pr.stdin.close()
+        except OSError:
+            pass
+    except BaseException:
+        pr.kill()
+        pr.wait()
+        raise
+    pr.wait()
+    if pr.returncode != 0 or not os.path.isfile(dst) or os.path.getsize(dst) < 1000:
+        log("ffmpeg segments: " + " | ".join(err) + (" (pipe closed)" if broken else ""))
+        raise TwitchError(L("Не удалось собрать видео (ffmpeg). Подробности в log.txt.", "Couldn't assemble the video (ffmpeg). See log.txt for details."))
+
+
+def parse_vod_id(s):
+    s = str(s or "").strip()
+    m = re.search(r"twitch\.tv/(?:[^/?#]+/)?videos?/(\d+)", s) or re.fullmatch(r"v?(\d{1,15})", s)
+    return m.group(1) if m else ""
+
+
+def parse_login(s):
+    s = re.sub(r"^(https?://)?(www\.|m\.)?twitch\.tv/", "", str(s or "").strip().lower()).split("/")[0].split("?")[0].lstrip("@")
+    return s if re.fullmatch(r"[a-z0-9_]{2,25}", s) else ""
+
+
+def helix_duration(s):
+    m = re.fullmatch(r"(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?", str(s or ""))
+    return (int(m.group(1) or 0) * 3600 + int(m.group(2) or 0) * 60 + int(m.group(3) or 0)) if m else 0
+
+
+def video_json(v):
+    th = str(v.get("thumbnail_url") or "")
+    th = "" if ("_404/" in th or "processing" in th or not th) else th.replace("%{width}", "320").replace("%{height}", "180")
+    return {"id": str(v.get("id", "")), "title": v.get("title") or "", "login": v.get("user_login") or "", "name": v.get("user_name") or "",
+            "created": v.get("created_at") or "", "duration": helix_duration(v.get("duration")), "thumb": th,
+            "views": int(v.get("view_count") or 0), "url": v.get("url") or "", "streamId": str(v.get("stream_id") or ""),
+            "muted": [[int(m.get("offset") or 0), int(m.get("duration") or 0)] for m in (v.get("muted_segments") or [])]}
+
+
+def vod_master(vod_id):
+    tok, sig = playback_token(vod_id=vod_id)
+    url = f"{USHER_URL}/vod/{vod_id}.m3u8?" + usher_query(tok, sig)
+    try:
+        text = web_get(url).decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        if e.code == 403:
+            raise TwitchError(L("Эта запись только для подписчиков канала — без входа в аккаунт её не скачать.",
+                                "This video is for channel subscribers only — it can't be downloaded without signing in."))
+        if e.code == 404:
+            raise TwitchError(L("Запись не найдена: возможно, её удалили или стример скрыл записи.",
+                                "Video not found: it may have been deleted or the streamer hid their videos."))
+        raise TwitchError(L(f"Twitch ответил {e.code}.", f"Twitch responded {e.code}."))
+    vs = parse_master(text, url)
+    if not vs:
+        raise TwitchError(L("Twitch не отдал список качеств записи.", "Twitch did not return the video qualities."))
+    return vs
+
+
+def vod_playlist(vod_id, quality):
+    v = pick_variant(vod_master(vod_id), quality)
+    text = web_get(v["url"]).decode("utf-8", "replace")
+    return v, parse_media(text, v["url"])
+
+
+def quality_list(vs):
+    out = []
+    for v in sorted(vs, key=lambda v: (not v["audio"], v["height"], v["fps"]), reverse=True):
+        key = "audio" if v["audio"] else str(v["height"])
+        if key not in [q["key"] for q in out]:
+            out.append({"key": key, "name": L("Только звук", "Audio only") if v["audio"] else v["name"], "bw": v["bw"]})
+    return out
+
+
+def download_vod(src, folder, progress=None, cancel=None):
+    quality = src.get("quality") or "1080"
+    v, pl = vod_playlist(src["id"], quality)
+    start, end = src.get("start"), src.get("end")
+    st = max(0.0, float(start or 0))
+    chosen, t = [], 0.0
+    for s in pl["segs"]:
+        a = t
+        t += s["dur"]
+        if t > st + 0.01 and (end is None or a < float(end) - 0.01):
+            chosen.append((a, s))
+    if not chosen:
+        raise TwitchError(L(f"В записи пока нет этого отрезка: она длится {clock(t)}.", f"The video doesn't have this part yet: it is {clock(t)} long."))
+    en = min(float(end), t) if end is not None else t
+    cut = start is not None or end is not None
+    audio = v["audio"]
+    precise = cut and (en - st) <= PRECISE_LIMIT
+    offset = st - chosen[0][0] if precise else 0.0
+    urls = ([pl["init"]] if pl["init"] else []) + [s["url"] for _, s in chosen]
+    tail = f" ({hms(st)}-{hms(en)})" if cut else ""
+    if quality != "1080":
+        tail += f" [{v['name']}]"
+    ext = ".m4a" if audio else ".mp4"
+    name = f'{safe_name(src.get("login") or "twitch")} - {safe_name(src.get("title") or "VOD")} - v{src["id"]}{tail}{ext}'
+    path = os.path.join(folder, name)
+    tmp = path + ".part"
+    try:
+        segments_to_file(fetch_ordered(urls, cancel), tmp, len(urls), offset, (en - st) if precise else None, precise, audio, cancel, progress,
+                         fmp4=bool(pl["init"]))
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+    muted = sum(1 for _, s in chosen if s["muted"])
+    return path, (L("Twitch заглушил звук в части этого отрезка", "Twitch muted the audio in part of this range") if muted else "")
+
+
+class LiveWatch:
+
+    def __init__(self, ctx, login, user):
+        import tempfile
+        self.ctx, self.login, self.uid = ctx, login, str(user["id"])
+        self.name = user.get("display_name") or login
+        self.avatar = user.get("profile_image_url") or ""
+        self.keep = ctx.live_keep()
+        self.quality = ctx.live_quality()
+        self.dir = os.path.join(tempfile.gettempdir(), "ClipSearch-live", f"{login}-{secrets.token_hex(3)}")
+        os.makedirs(self.dir, exist_ok=True)
+        self.segs = []
+        self.lock = threading.Lock()
+        self.pins = 0
+        self.state, self.error, self.info = "start", "", {}
+        self.media, self.variant, self.last_seq = None, "", -1
+        self.inits = {}
+        self.ad_until = 0.0
+        self.last_info = 0.0
+        self.since = time.time()
+        self.stop = threading.Event()
+        threading.Thread(target=self.run, daemon=True).start()
+
+    def refresh_info(self):
+        self.last_info = time.time()
+        try:
+            tw = self.ctx.twitch()
+            d = tw.get("/streams", {"user_id": self.uid}).get("data") or []
+            if not d:
+                self.info = {}
+                return
+            s = d[0]
+            info = {"title": s.get("title") or "", "game": s.get("game_name") or "", "viewers": int(s.get("viewer_count") or 0),
+                    "startedAt": s.get("started_at") or "", "streamId": str(s.get("id") or ""),
+                    "thumb": str(s.get("thumbnail_url") or "").replace("{width}", "440").replace("{height}", "248") + f"?t={int(time.time() // 60)}"}
+            old = self.info.get("vod") if self.info.get("streamId") == info["streamId"] else None
+            if old is None:
+                for v in tw.get("/videos", {"user_id": self.uid, "type": "archive", "first": 5}).get("data") or []:
+                    if str(v.get("stream_id") or "") == info["streamId"]:
+                        old = {"id": str(v["id"]), "title": v.get("title") or info["title"]}
+                        break
+            info["vod"] = old
+            self.info = info
+        except Exception as e:
+            log(f"live info {self.login}: {e!r}")
+
+    def open_media(self):
+        tok, sig = playback_token(login=self.login)
+        url = f"{USHER_URL}/api/channel/hls/{self.login}.m3u8?" + usher_query(tok, sig)
+        try:
+            text = web_get(url, tries=2).decode("utf-8", "replace")
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return False
+            raise
+        v = pick_variant(parse_master(text, url), self.quality)
+        self.media, self.variant = v["url"], v["name"]
+        return True
+
+    def run(self):
+        fails = 0
+        while not self.stop.is_set():
+            try:
+                if time.time() - self.last_info > 60:
+                    self.refresh_info()
+                if not self.media:
+                    if not self.open_media():
+                        self.state, self.error = "offline", ""
+                        self.stop.wait(20)
+                        continue
+                text = web_get(self.media, timeout=10, tries=2).decode("utf-8", "replace")
+                pl = parse_media(text, self.media)
+                init_path = None
+                if pl["init"]:
+                    init_path = self.inits.get(pl["init"])
+                    if init_path is None:
+                        init_path = os.path.join(self.dir, f"init{len(self.inits)}.mp4")
+                        with open(init_path, "wb") as f:
+                            f.write(web_get(pl["init"], timeout=15, tries=2))
+                        self.inits[pl["init"]] = init_path
+                fresh = False
+                for s in pl["segs"]:
+                    if s["seq"] <= self.last_seq or self.stop.is_set():
+                        continue
+                    self.last_seq = s["seq"]
+                    if s["ad"]:
+                        self.ad_until = time.time() + 6
+                        continue
+                    data = web_get(s["url"], timeout=15, tries=2)
+                    p = os.path.join(self.dir, f"{s['seq']}.ts")
+                    with open(p, "wb") as f:
+                        f.write(data)
+                    with self.lock:
+                        self.segs.append({"seq": s["seq"], "path": p, "dur": s["dur"], "t": time.time(), "size": len(data), "init": init_path})
+                    fresh = True
+                self.state = "ad" if time.time() < self.ad_until else "live"
+                self.error = ""
+                if pl["ended"]:
+                    self.media = None
+                self.prune()
+                fails = 0
+                self.stop.wait(1.0 if fresh else 1.5)
+            except urllib.error.HTTPError as e:
+                fails += 1
+                self.media = None
+                if fails > 2:
+                    self.error = L(f"Twitch ответил {e.code}", f"Twitch responded {e.code}")
+                self.stop.wait(min(20, 2 * fails))
+            except Exception as e:
+                fails += 1
+                self.media = None if fails > 2 else self.media
+                self.error = str(e)
+                if fails in (1, 5, 20):
+                    log(f"live {self.login}: {e!r}")
+                self.stop.wait(min(30, 2 * fails))
+        self.cleanup()
+
+    def prune(self):
+        with self.lock:
+            if self.pins:
+                return
+            total = sum(s["dur"] for s in self.segs)
+            while self.segs and total - self.segs[0]["dur"] >= self.keep * 60:
+                s = self.segs.pop(0)
+                total -= s["dur"]
+                try:
+                    os.remove(s["path"])
+                except OSError:
+                    pass
+
+    def cleanup(self):
+        for _ in range(600):
+            with self.lock:
+                if not self.pins:
+                    break
+            time.sleep(0.1)
+        import shutil
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def take(self, back_from, back_to):
+        with self.lock:
+            segs = list(self.segs)
+            self.pins += 1
+        total = sum(s["dur"] for s in segs)
+        out, pos = [], 0.0
+        for s in segs:
+            a, b = pos, pos + s["dur"]
+            pos = b
+            if b > total - back_from + 0.01 and a < total - back_to - 0.01:
+                out.append(s)
+        return out
+
+    def release(self):
+        with self.lock:
+            self.pins = max(0, self.pins - 1)
+
+    def view(self):
+        with self.lock:
+            dur = sum(s["dur"] for s in self.segs)
+            size = sum(s["size"] for s in self.segs)
+            last = self.segs[-1]["t"] if self.segs else 0
+        return {"login": self.login, "name": self.name, "avatar": self.avatar, "state": self.state, "error": self.error,
+                "info": self.info, "buffered": round(dur, 1), "keep": self.keep * 60, "size": size, "quality": self.variant,
+                "age": round(time.time() - last, 1) if last else None, "since": int(self.since)}
+
+
+def save_live_clip(ctx, src, folder, progress=None, cancel=None):
+    w = ctx.live.get(src["login"])
+    if w is None:
+        raise TwitchError(L("Этот канал больше не отслеживается.", "This channel is no longer being watched."))
+    segs = w.take(float(src["from"]), float(src["to"]))
+    try:
+        if not segs:
+            raise TwitchError(L("В памяти пока нет видео за этот отрезок.", "There is no video for this range in memory yet."))
+        init = segs[-1].get("init")
+        segs = [s for s in segs if s.get("init") == init]
+        dur = sum(s["dur"] for s in segs)
+        when = datetime.fromtimestamp(segs[-1]["t"]).strftime("%Y-%m-%d %H-%M-%S")
+        name = f'{safe_name(w.name)} - {L("эфир", "live")} {when} ({int(round(dur))} {L("с", "s")}).mp4'
+        path = os.path.join(folder, name)
+        tmp = path + ".part"
+
+        def chunks():
+            for path in ([init] if init else []) + [s["path"] for s in segs]:
+                with open(path, "rb") as f:
+                    yield f.read()
+        try:
+            segments_to_file(chunks(), tmp, len(segs) + (1 if init else 0), cancel=cancel, progress=progress, fmp4=bool(init))
+            os.replace(tmp, path)
+        except BaseException:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise
+        return path, ""
+    finally:
+        w.release()
+
+
+def clean_live_temp():
+    import tempfile, shutil
+    root = os.path.join(tempfile.gettempdir(), "ClipSearch-live")
+    try:
+        for e in os.scandir(root):
+            if e.is_dir() and time.time() - e.stat().st_mtime > 600:
+                shutil.rmtree(e.path, ignore_errors=True)
+    except OSError:
+        pass
+
+
 UI_HTML = r'''<!doctype html>
 <html lang="ru">
 <head>
@@ -969,6 +1532,7 @@ kbd { font: inherit; font-size: 11px; padding: 1px 6px; border-radius: 6px; bord
 .dl .t span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dl .t span:last-child { color: var(--muted); flex: none; }
 .dl .err { color: #ffb3bd; font-size: 12px; }
+.dl .err.warnnote { color: var(--warn); }
 .folder { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 14px; background: rgba(8, 13, 38, 0.7); border: 1px solid var(--line); color: var(--muted); font-size: 12.5px; margin-bottom: 12px; }
 .folder span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
 .folder button { background: none; border: 0; color: #a9b9ff; padding: 0; text-decoration: underline; text-underline-offset: 3px; flex: none; }
@@ -1406,6 +1970,82 @@ input, textarea, .errmsg { user-select: text; -webkit-user-select: text; }
 #railDl .dacts button { width: 24px; height: 24px; font-size: 12px; }
 
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+.nav .count.lvcount { background: #e5384f; }
+.seg.solid .chip.on { color: #fff; background: linear-gradient(180deg, #5a7bff, #3f5ee8); border-color: transparent; box-shadow: 0 0 18px rgba(80, 110, 255, 0.35); }
+.vdtimes .field.tfield { flex: 0 0 160px !important; width: 160px; max-width: 160px; }
+.live-add, .vod-find { display: grid; gap: 14px; margin-bottom: 18px; }
+.live-add .row .btn, .vod-find .row .btn { flex: none; }
+.live-opts { display: flex; flex-wrap: wrap; gap: 10px 26px; }
+.live-add .hint { margin: 0; }
+.live-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; }
+.lv { display: grid; gap: 12px; padding: 16px; position: relative; animation: lvrise .45s var(--ease, ease) both; }
+.lv-top { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.lv-top .av { width: 40px; height: 40px; border-radius: 50%; object-fit: cover; background: #1b2757; flex: none; border: 1px solid var(--line); }
+.lv-who { display: grid; min-width: 0; flex: 1; }
+.lv-who b { font-weight: 500; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lv-state { font-size: 12.5px; color: var(--muted); display: flex; align-items: center; gap: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lv-state::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: #626ea3; flex: none; }
+.lv[data-state="live"] .lv-state::before { background: #ff4d63; box-shadow: 0 0 0 0 rgba(255, 77, 99, .6); animation: lvpulse 1.6s infinite; }
+.lv[data-state="ad"] .lv-state::before { background: var(--warn); }
+.lv[data-state="start"] .lv-state::before { background: #8aa0ff; animation: lvpulse 1.6s infinite; }
+@keyframes lvpulse { 0% { box-shadow: 0 0 0 0 rgba(255, 77, 99, .55); } 70% { box-shadow: 0 0 0 8px rgba(255, 77, 99, 0); } 100% { box-shadow: 0 0 0 0 rgba(255, 77, 99, 0); } }
+.lv .xbtn { width: 34px; height: 34px; border-radius: 50%; border: 1px solid var(--line); background: none; color: var(--muted); display: grid; place-items: center; flex: none; }
+.lv .xbtn:hover { color: #fff; border-color: var(--line-strong); }
+.lv-shot { position: relative; aspect-ratio: 16 / 9; border-radius: 14px; overflow: hidden; background: linear-gradient(160deg, #1a2766, #0b1236); border: 1px solid var(--line); }
+.lv-shot img { width: 100%; height: 100%; object-fit: cover; display: block; transition: opacity .4s; }
+.lv-shot .off { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: 13px; text-align: center; padding: 0 20px; }
+.lv-shot .tag { position: absolute; left: 10px; top: 10px; background: #e5384f; color: #fff; font-size: 11px; font-weight: 600; letter-spacing: .06em; padding: 2px 8px; border-radius: 6px; }
+.lv-shot .q { position: absolute; right: 10px; top: 10px; background: rgba(5, 8, 24, .78); font-size: 11.5px; padding: 2px 8px; border-radius: 6px; }
+.lv-title { font-size: 13.5px; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; min-height: 2.7em; }
+.lv-title small { display: block; color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+.lv-buf { display: grid; gap: 6px; }
+.lv-buf .note { display: flex; justify-content: space-between; gap: 10px; font-variant-numeric: tabular-nums; }
+.lv-acts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.lv-acts .wide { grid-column: 1 / -1; }
+.lv-acts .btn { padding: 0 10px; }
+.lv .linkbtn { justify-self: start; }
+.clipdlg { width: 600px; }
+.clipdlg h2, .voddlg h2 { margin: 0 0 6px; font-weight: 500; font-size: 20px; }
+.trim .scale { display: flex; justify-content: space-between; color: var(--faint); font-size: 12px; margin-top: 6px; font-variant-numeric: tabular-nums; }
+.clipdlg .trim, .voddlg .trim { margin: 14px 0 4px; }
+.modal .foot { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+.voddlg { width: 680px; }
+.voddlg .ph { display: flex; gap: 14px; align-items: flex-start; margin-bottom: 14px; }
+.voddlg .ph .grow { flex: 1; min-width: 0; }
+.voddlg .ph h2 { overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.voddlg .meta { color: var(--muted); font-size: 13px; }
+.voddlg .xbtn { width: 38px; height: 38px; border-radius: 50%; border: 1px solid var(--line); background: none; color: var(--muted); display: grid; place-items: center; flex: none; }
+.vdload { display: flex; align-items: center; gap: 12px; color: var(--muted); padding: 26px 4px; }
+.spin { width: 22px; height: 22px; border-radius: 50%; border: 2.5px solid rgba(150, 172, 255, .25); border-top-color: #8aa0ff; animation: spin .8s linear infinite; }
+.vderr { color: #ffb3bd; background: rgba(255, 90, 110, .1); border: 1px solid rgba(255, 90, 110, .3); border-radius: 14px; padding: 12px 14px; margin: 6px 0; }
+#vdBody { display: grid; gap: 14px; }
+#vdBody[hidden] { display: none; }
+.mutes { position: absolute; inset: 0; pointer-events: none; }
+.mutes i { position: absolute; top: 0; bottom: 0; background: repeating-linear-gradient(135deg, rgba(255, 180, 84, .38) 0 4px, transparent 4px 8px); }
+.vdtimes { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 12px; }
+.tfield { flex: 0 0 150px; height: 40px; }
+.tfield span { color: var(--muted); font-size: 13px; }
+.tfield input { font-variant-numeric: tabular-nums; }
+.vdquick { display: flex; gap: 6px; flex-wrap: wrap; }
+.vdquick .chip { height: 32px; padding: 0 12px; font-size: 12.5px; }
+.vdnotes { display: grid; gap: 6px; color: var(--muted); font-size: 13px; }
+.vdnotes .w { color: var(--warn); }
+.vod-list { display: grid; gap: 12px; }
+.vd { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 16px; padding: 12px; border-radius: var(--radius-md); background: var(--panel); border: 1px solid var(--line); animation: lvrise .4s var(--ease, ease) both; animation-delay: var(--d, 0s); }
+.vd .vth { position: relative; aspect-ratio: 16 / 9; border-radius: 12px; overflow: hidden; background: linear-gradient(160deg, #1a2766, #0b1236); }
+.vd .vth img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.vd .vth .dur { position: absolute; right: 7px; bottom: 7px; background: rgba(5, 8, 24, 0.82); padding: 1px 7px; border-radius: 8px; font-size: 12px; font-variant-numeric: tabular-nums; }
+.vd .vth .tag { position: absolute; left: 8px; top: 8px; background: #e5384f; color: #fff; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 6px; }
+.vd h4 { margin: 2px 0 6px; font-weight: 500; font-size: 15px; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.vd .meta { color: var(--muted); font-size: 12.5px; display: flex; flex-wrap: wrap; gap: 4px 14px; }
+.vd .meta .w { color: var(--warn); }
+.vd .vacts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.vd-user { display: flex; align-items: center; gap: 12px; margin: 4px 0 2px; }
+.vd-user img { width: 34px; height: 34px; border-radius: 50%; }
+.vd-user b { font-weight: 500; font-size: 16px; }
+@media (max-width: 900px) { .vd { grid-template-columns: 1fr; } .live-grid { grid-template-columns: 1fr; } }
+@keyframes lvrise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+body.glass-os .vd { background: linear-gradient(150deg, rgba(60, 82, 180, 0.16), rgba(12, 18, 56, 0.26)); }
 </style>
 </head>
 <body>
@@ -1434,6 +2074,8 @@ input, textarea, .errmsg { user-select: text; -webkit-user-select: text; }
     <div class="brand"><img src="/icon.png" alt=""><b>Clip<span>Search</span></b></div>
     <nav class="nav" aria-label="Разделы" id="mainNav"><span class="navind" id="navInd"></span>
       <button class="on" data-view="search"><span class="ic"><svg class="i" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg></span><span>Поиск</span></button>
+      <button data-view="live"><span class="ic"><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.2"/><path d="M8.1 8.1a5.5 5.5 0 0 0 0 7.8M15.9 8.1a5.5 5.5 0 0 1 0 7.8M5.3 5.3a9.5 9.5 0 0 0 0 13.4M18.7 5.3a9.5 9.5 0 0 1 0 13.4"/></svg></span><span>Эфир</span><span class="count lvcount" id="liveCount" hidden>0</span></button>
+      <button data-view="vods"><span class="ic"><svg class="i" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="m10.2 9.2 4.6 2.8-4.6 2.8z"/></svg></span><span>Записи</span></button>
       <button data-view="downloads"><span class="ic"><svg class="i" viewBox="0 0 24 24"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14"/></svg></span><span>Загрузки</span><span class="count" id="dlCount" hidden>0</span></button>
     </nav>
     <div class="spacer"></div>
@@ -1553,6 +2195,39 @@ input, textarea, .errmsg { user-select: text; -webkit-user-select: text; }
         </div>
       </div>
 
+      <div class="view" id="v-live">
+        <h1>Клипы из <b>эфира</b></h1>
+        <p class="lede">Добавьте стримера — приложение будет держать в памяти последние минуты трансляции вместе со звуком, даже если там играет музыка. Случился момент — нажмите «Клип».</p>
+        <div class="card live-add">
+          <div class="row">
+            <label class="field" id="fLive" for="liveLogin"><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/></svg><input id="liveLogin" placeholder="Ник стримера или ссылка на канал" autocomplete="off" spellcheck="false"></label>
+            <button class="btn primary" id="liveAdd" type="button"><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.2"/><path d="M8.1 8.1a5.5 5.5 0 0 0 0 7.8M15.9 8.1a5.5 5.5 0 0 1 0 7.8"/></svg>Следить за эфиром</button>
+          </div>
+          <div class="live-opts">
+            <div class="seg solid" id="liveKeep"><span class="lbl">Держать в памяти</span><button class="chip" type="button" data-k="2">2 мин</button><button class="chip" type="button" data-k="5">5 мин</button><button class="chip" type="button" data-k="10">10 мин</button><button class="chip" type="button" data-k="15">15 мин</button></div>
+            <div class="seg solid" id="liveQ"><span class="lbl">Качество</span><button class="chip" type="button" data-q="1080">1080p</button><button class="chip" type="button" data-q="720">720p</button><button class="chip" type="button" data-q="480">480p</button></div>
+          </div>
+          <p class="hint">Пока канал в списке, приложение смотрит эфир в фоне: трафик как при обычном просмотре, около 3 ГБ в час в 1080p. Рекламные вставки Twitch в клипы не попадают.</p>
+        </div>
+        <div class="live-grid" id="liveList"></div>
+        <div class="empty" id="liveEmpty"><div class="big"><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.2"/><path d="M8.1 8.1a5.5 5.5 0 0 0 0 7.8M15.9 8.1a5.5 5.5 0 0 1 0 7.8M5.3 5.3a9.5 9.5 0 0 0 0 13.4M18.7 5.3a9.5 9.5 0 0 1 0 13.4"/></svg></div><h3>Здесь появятся эфиры</h3><p>Впишите стримера и нажмите «Следить за эфиром». Можно следить за четырьмя каналами сразу.</p></div>
+      </div>
+
+      <div class="view" id="v-vods">
+        <h1>Записи <b>трансляций</b></h1>
+        <p class="lede">Скачайте запись эфира целиком или вырежьте нужный кусок — даже у эфира, который ещё идёт. Видео качается прямо с Twitch.</p>
+        <div class="card vod-find">
+          <div class="row">
+            <label class="field" id="fVod" for="vodQ"><svg class="i" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input id="vodQ" placeholder="Ник стримера или ссылка на запись (twitch.tv/videos/…)" autocomplete="off" spellcheck="false"></label>
+            <button class="btn primary" id="vodGo" type="button"><svg class="i" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>Найти записи</button>
+          </div>
+          <div class="seg solid" id="vodType"><span class="lbl">Показывать</span><button class="chip on" type="button" data-t="archive">Трансляции</button><button class="chip" type="button" data-t="highlight">Хайлайты</button><button class="chip" type="button" data-t="upload">Загруженные</button></div>
+        </div>
+        <div id="vodAlert"></div>
+        <div class="vod-list" id="vodList"><div class="empty"><div class="big"><svg class="i" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="m10.2 9.2 4.6 2.8-4.6 2.8z"/></svg></div><h3>Здесь появятся записи</h3><p>Впишите стримера — покажем его последние трансляции. Или вставьте ссылку на конкретную запись.</p></div></div>
+        <button class="btn more" id="vodMore" type="button" hidden>Показать ещё</button>
+      </div>
+
       <div class="view" id="v-downloads">
         <h1>Загрузки</h1>
         <p class="lede">Клипы, скачанные в этой сессии, и всё, что уже лежит в папке загрузок.</p>
@@ -1637,6 +2312,40 @@ input, textarea, .errmsg { user-select: text; -webkit-user-select: text; }
     <p>Работают в списке найденных клипов, когда курсор не стоит в поле ввода.</p>
     <div class="kl" id="kList"></div>
     <div class="foot"><button class="btn primary" id="khClose">Понятно</button></div>
+  </div>
+</div>
+<div class="veil" id="clipVeil">
+  <div class="modal clipdlg" role="dialog" aria-labelledby="cdTitle">
+    <h2 id="cdTitle">Клип из эфира</h2>
+    <p class="note" id="cdSub"></p>
+    <div class="trim">
+      <div class="tl" id="cdTl"><div class="rng"></div><button class="hd" type="button" aria-label="Начало клипа"></button><button class="hd" type="button" aria-label="Конец клипа"></button></div>
+      <div class="scale"><span id="cdMin"></span><span id="cdNow">сейчас</span></div>
+      <div class="tinfo"><span>Начало: <b id="cdA"></b></span><span>Конец: <b id="cdB"></b></span><span>Длина клипа: <b id="cdLen"></b></span></div>
+    </div>
+    <div class="foot"><button class="btn" id="cdCancel" type="button">Отмена</button><button class="btn primary" id="cdGo" type="button"><svg class="i" viewBox="0 0 24 24"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14"/></svg>Сохранить клип</button></div>
+  </div>
+</div>
+<div class="veil" id="vodVeil">
+  <div class="modal voddlg" role="dialog" aria-labelledby="vdTitle">
+    <div class="ph"><div class="grow"><h2 id="vdTitle"></h2><div class="meta" id="vdMeta"></div></div><button class="xbtn" id="vdClose" type="button" aria-label="Закрыть"><svg class="i" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
+    <div class="vdload" id="vdLoad"><div class="spin"></div><span>Узнаю длину записи и доступные качества…</span></div>
+    <div class="vderr" id="vdErr" hidden></div>
+    <div id="vdBody" hidden>
+      <div class="seg" id="vdMode"><span class="glide"></span><button class="chip on" type="button" data-m="cut">Отрезок</button><button class="chip" type="button" data-m="full">Целиком</button></div>
+      <div class="trim" id="vdCut">
+        <div class="tl" id="vdTl"><div class="mutes" id="vdMutes"></div><div class="rng"></div><button class="hd" type="button" aria-label="Начало отрезка"></button><button class="hd" type="button" aria-label="Конец отрезка"></button></div>
+        <div class="scale"><span>0:00</span><span id="vdLen"></span></div>
+        <div class="vdtimes">
+          <label class="field tfield"><span>С</span><input id="vdA" inputmode="numeric" autocomplete="off" spellcheck="false"></label>
+          <label class="field tfield"><span>по</span><input id="vdB" inputmode="numeric" autocomplete="off" spellcheck="false"></label>
+          <span class="vdquick" id="vdQuick"></span>
+        </div>
+      </div>
+      <div class="seg solid" id="vdQ"><span class="lbl">Качество</span></div>
+      <div class="vdnotes" id="vdNotes"></div>
+    </div>
+    <div class="foot"><button class="btn" id="vdCancel" type="button">Отмена</button><button class="btn primary" id="vdGo" type="button" disabled><svg class="i" viewBox="0 0 24 24"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14"/></svg><span id="vdGoT">Скачать</span></button></div>
   </div>
 </div>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
@@ -1769,6 +2478,7 @@ const RULES = [
   [/^Не удалось получить ссылку на скачивание клипа (.+)\.$/, "Couldn’t get a download link for clip $1."], [/^Неожиданная ошибка: (.*)$/, "Unexpected error: $1"],
   [/^Слишком много запросов, подождите минуту\.$/, "Too many requests, please wait a minute."],
 ];
+Object.assign(EN, {"Эфир": "Live", "Записи": "Videos", "Клипы из": "Clips from the", "эфира": "stream", "Добавьте стримера — приложение будет держать в памяти последние минуты трансляции вместе со звуком, даже если там играет музыка. Случился момент — нажмите «Клип».": "Add a streamer — the app keeps the last minutes of the broadcast in memory with the sound, even when music is playing. When the moment happens, press “Clip”.", "Ник стримера или ссылка на канал": "Streamer name or channel link", "Следить за эфиром": "Watch the stream", "Держать в памяти": "Keep in memory", "2 мин": "2 min", "5 мин": "5 min", "10 мин": "10 min", "15 мин": "15 min", "Качество": "Quality", "Пока канал в списке, приложение смотрит эфир в фоне: трафик как при обычном просмотре, около 3 ГБ в час в 1080p. Рекламные вставки Twitch в клипы не попадают.": "While a channel is on the list, the app watches the stream in the background: traffic is like normal viewing, about 3 GB per hour in 1080p. Twitch ad breaks don’t end up in clips.", "Здесь появятся эфиры": "Streams will appear here", "Впишите стримера и нажмите «Следить за эфиром». Можно следить за четырьмя каналами сразу.": "Enter a streamer and press “Watch the stream”. You can watch four channels at once.", "трансляций": "of past streams", "Скачайте запись эфира целиком или вырежьте нужный кусок — даже у эфира, который ещё идёт. Видео качается прямо с Twitch.": "Download a whole broadcast or cut out the part you need — even from a stream that is still live. The video downloads straight from Twitch.", "Ник стримера или ссылка на запись (twitch.tv/videos/…)": "Streamer name or video link (twitch.tv/videos/…)", "Найти записи": "Find videos", "Показывать": "Show", "Трансляции": "Broadcasts", "Хайлайты": "Highlights", "Загруженные": "Uploads", "Здесь появятся записи": "Videos will appear here", "Впишите стримера — покажем его последние трансляции. Или вставьте ссылку на конкретную запись.": "Enter a streamer to see their recent broadcasts. Or paste a link to a specific video.", "Клип из эфира": "Live clip", "Начало клипа": "Clip start", "Конец клипа": "Clip end", "сейчас": "now", "Начало:": "Start:", "Конец:": "End:", "Длина клипа:": "Clip length:", "Отмена": "Cancel", "Сохранить клип": "Save clip", "Узнаю длину записи и доступные качества…": "Checking the video length and available qualities…", "Отрезок": "Range", "Целиком": "Whole", "Начало отрезка": "Range start", "Конец отрезка": "Range end", "Скачать": "Download"});
 function tr(s) {
   if (!s || !/[А-Яа-яЁё]/.test(s)) return s;
   const t = s.trim();
@@ -2528,7 +3238,8 @@ function dlFill(node, it) {
   h.classList.toggle("done", it.state === "done"); h.classList.toggle("run", it.state === "load" || it.state === "wait");
   h.classList.toggle("stopped", it.state === "stop" || it.state === "fail");
   h.querySelector("i").style.width = (it.state === "stop" ? 0 : pct) + "%";
-  const er = node.querySelector(".err"); er.textContent = it.error || ""; er.hidden = !it.error || it.state !== "fail";
+  const er = node.querySelector(".err"), showNote = it.state === "done" && it.note;
+  er.textContent = it.state === "fail" ? (it.error || "") : (showNote ? it.note : ""); er.hidden = !((it.state === "fail" && it.error) || showNote); er.classList.toggle("warnnote", !!showNote);
 }
 function dlList(box, items, emptyHtml) {
   if (!items.length) { if (!box.querySelector(".dlempty")) box.innerHTML = `<div class="dlempty">${emptyHtml}</div>`; return; }
@@ -3128,6 +3839,276 @@ addEventListener("keydown", (e) => {
 
 $("dlClear").addEventListener("click", async () => { const r = await api("/api/download/clear", {}).catch(() => null); if (r && r.items) applyDownloads(r.items); });
 
+const RU = window.CS_LANG !== "en";
+const t2 = (ru, en) => (RU ? ru : en);
+function clock(sec) {
+  sec = Math.max(0, Math.round(sec)); const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60;
+  return h ? `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}` : `${m}:${String(s).padStart(2, "0")}`;
+}
+function parseClock(v) {
+  v = String(v || "").trim().replace(",", ".");
+  if (!v) return null;
+  if (/^\d+(\.\d+)?$/.test(v)) return parseFloat(v);
+  const p = v.split(":"); if (p.length > 3 || p.some((x) => !/^\d+(\.\d+)?$/.test(x))) return null;
+  return p.reduce((a, x) => a * 60 + parseFloat(x), 0);
+}
+function rangeSlider(tl, onMove) {
+  const rng = tl.querySelector(".rng"), [ha, hb] = tl.querySelectorAll(".hd");
+  const st = { len: 1, a: 0, b: 1, min: 1 };
+  const paint = () => {
+    const pa = st.a / st.len * 100, pb = st.b / st.len * 100;
+    ha.style.left = pa + "%"; hb.style.left = pb + "%"; rng.style.left = pa + "%"; rng.style.width = Math.max(0, pb - pa) + "%";
+  };
+  const at = (e) => { const r = tl.getBoundingClientRect(); return Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)) * st.len; };
+  let drag = null;
+  const move = (e) => {
+    if (!drag) return; const v = at(e);
+    if (drag === "a") st.a = Math.min(v, st.b - st.min); else st.b = Math.max(v, st.a + st.min);
+    st.a = Math.max(0, st.a); st.b = Math.min(st.len, st.b); paint(); onMove(st);
+  };
+  tl.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return; e.preventDefault();
+    const v = at(e); drag = e.target === ha ? "a" : e.target === hb ? "b" : Math.abs(v - st.a) < Math.abs(v - st.b) ? "a" : "b";
+    tl.setPointerCapture(e.pointerId); move(e);
+  });
+  tl.addEventListener("pointermove", move);
+  const end = () => { drag = null; };
+  tl.addEventListener("pointerup", end); tl.addEventListener("pointercancel", end);
+  return { st, set(len, a, b, min) { st.len = Math.max(1, len); st.min = min || 1; st.a = Math.max(0, Math.min(a, st.len)); st.b = Math.max(st.a, Math.min(b, st.len)); paint(); } };
+}
+
+const LV = { items: [], keep: 5, q: "1080", busy: false, cards: new Map() };
+function paintLiveOpts() {
+  document.querySelectorAll("#liveKeep .chip").forEach((c) => c.classList.toggle("on", +c.dataset.k === LV.keep));
+  document.querySelectorAll("#liveQ .chip").forEach((c) => c.classList.toggle("on", c.dataset.q === LV.q));
+}
+function liveStateText(w) {
+  if (w.state === "live") return t2("В эфире", "Live") + (w.info && w.info.viewers ? " · " + w.info.viewers.toLocaleString(LOC) + " " + t2(plural(w.info.viewers, ["зритель", "зрителя", "зрителей"]), w.info.viewers === 1 ? "viewer" : "viewers") : "");
+  if (w.state === "ad") return t2("Реклама Twitch — ждём эфир", "Twitch ad break — waiting for the stream");
+  if (w.state === "offline") return t2("Не в эфире — ждём начала", "Offline — waiting for the stream");
+  return t2("Подключаюсь…", "Connecting…");
+}
+function liveCard(w) {
+  const n = document.createElement("div"); n.className = "card lv"; n.dataset.login = w.login;
+  n.innerHTML = `<div class="lv-top"><img class="av" alt=""><div class="lv-who"><b></b><span class="lv-state"></span></div>
+    <button class="xbtn" type="button" data-a="unwatch" title="${t2("Перестать следить", "Stop watching")}"><svg class="i" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
+    <div class="lv-shot"><img alt="" loading="lazy"><div class="off" hidden></div><span class="tag" hidden>LIVE</span><span class="q" hidden></span></div>
+    <div class="lv-title"></div>
+    <div class="lv-buf"><div class="hatch run"><i style="width:0"></i></div><div class="note"><span class="b1"></span><span class="b2"></span></div></div>
+    <div class="lv-acts"><button class="btn slim primary" type="button" data-a="clip" data-s="30">${t2("Клип 30 с", "Clip 30 s")}</button><button class="btn slim" type="button" data-a="clip" data-s="60">${t2("1 мин", "1 min")}</button><button class="btn slim" type="button" data-a="clip" data-s="120">${t2("2 мин", "2 min")}</button>
+    <button class="btn slim wide" type="button" data-a="pick"><svg class="i" viewBox="0 0 24 24"><circle cx="6" cy="6" r="2.6"/><circle cx="6" cy="18" r="2.6"/><path d="M8.2 7.6 20 18M8.2 16.4 20 6"/></svg>${t2("Выбрать отрезок…", "Choose a range…")}</button></div>
+    <button class="linkbtn" type="button" data-a="vod" hidden>${t2("Запись этого эфира: вырезать любой момент с начала →", "This stream’s video: cut any moment from the start →")}</button>`;
+  n.querySelector(".av").src = w.avatar || "/icon.png";
+  return n;
+}
+function paintLive(items) {
+  LV.items = items; const box = $("liveList");
+  $("liveEmpty").hidden = items.length > 0;
+  const live = items.filter((w) => w.state === "live" || w.state === "ad").length;
+  $("liveCount").hidden = !live; $("liveCount").textContent = live;
+  const keep = new Set(items.map((w) => w.login));
+  for (const [k, n] of LV.cards) if (!keep.has(k)) { n.remove(); LV.cards.delete(k); }
+  items.forEach((w) => {
+    let n = LV.cards.get(w.login);
+    if (!n) { n = liveCard(w); LV.cards.set(w.login, n); box.appendChild(n); }
+    n.dataset.state = w.state;
+    n.querySelector(".lv-who b").textContent = w.name;
+    n.querySelector(".lv-state").textContent = liveStateText(w) + (w.error && w.state !== "live" ? " · " + w.error : "");
+    const info = w.info || {}, img = n.querySelector(".lv-shot img"), off = n.querySelector(".lv-shot .off");
+    const on = w.state === "live" || w.state === "ad";
+    if (info.thumb && on) { if (img.dataset.src !== info.thumb) { img.dataset.src = info.thumb; img.src = info.thumb; } img.hidden = false; off.hidden = true; }
+    else { img.hidden = true; off.hidden = false; off.textContent = w.state === "offline" ? t2("Стример сейчас не в эфире. Как только он начнёт — приложение сразу начнёт запоминать.", "The streamer is offline. As soon as they go live, the app starts remembering.") : t2("Подключаюсь к эфиру…", "Connecting to the stream…"); }
+    n.querySelector(".lv-shot .tag").hidden = !on;
+    const q = n.querySelector(".lv-shot .q"); q.hidden = !w.quality; q.textContent = w.quality || "";
+    const tt = n.querySelector(".lv-title");
+    const html = info.title ? `${esc(info.title)}${info.game ? `<small>${esc(info.game)}</small>` : ""}` : `<small>${esc(t2("Название трансляции появится, когда стример выйдет в эфир.", "The stream title appears once the streamer goes live."))}</small>`;
+    if (tt.dataset.h !== html) { tt.dataset.h = html; tt.innerHTML = html; }
+    const pct = Math.min(100, w.buffered / Math.max(1, w.keep) * 100);
+    n.querySelector(".lv-buf i").style.width = pct + "%";
+    n.querySelector(".lv-buf .hatch").classList.toggle("run", w.state === "live");
+    n.querySelector(".b1").textContent = t2("В памяти ", "In memory ") + clock(w.buffered) + t2(" из ", " of ") + clock(w.keep);
+    n.querySelector(".b2").textContent = w.size ? fmtBytes(w.size) : "";
+    n.querySelectorAll('[data-a="clip"]').forEach((b) => { b.disabled = w.buffered < 3; });
+    n.querySelector('[data-a="pick"]').disabled = w.buffered < 3;
+    const vb = n.querySelector('[data-a="vod"]'); vb.hidden = !(info.vod && info.vod.id); vb.dataset.id = info.vod ? info.vod.id : "";
+  });
+}
+async function liveRefresh() {
+  if (LV.busy) return; LV.busy = true;
+  try { const r = await api("/api/live/list", {}).catch(() => null); if (r && r.items) { LV.keep = r.keep; LV.q = r.quality; paintLiveOpts(); paintLive(r.items); } }
+  finally { LV.busy = false; }
+}
+setInterval(() => { if (LV.items.length || $("v-live").classList.contains("on")) liveRefresh(); }, 1500);
+async function liveAdd() {
+  const v = $("liveLogin").value.trim(); if (!v) { $("liveLogin").focus(); return; }
+  $("liveAdd").disabled = true;
+  const r = await api("/api/live/watch", { login: v }).catch(() => ({ error: t2("Нет связи с программой", "No connection to the app") }));
+  $("liveAdd").disabled = false;
+  if (r.error) { toast(r.error); return; }
+  $("liveLogin").value = ""; paintLive(r.items); toast(t2("Слежу за эфиром", "Watching the stream"));
+}
+$("liveAdd").addEventListener("click", liveAdd);
+$("liveLogin").addEventListener("keydown", (e) => { if (e.key === "Enter") liveAdd(); });
+$("liveKeep").addEventListener("click", async (e) => { const c = e.target.closest(".chip"); if (!c) return; const r = await api("/api/live/settings", { keep: +c.dataset.k }); if (r && !r.error) { LV.keep = r.keep; paintLiveOpts(); } });
+$("liveQ").addEventListener("click", async (e) => { const c = e.target.closest(".chip"); if (!c) return; const r = await api("/api/live/settings", { quality: c.dataset.q }); if (r && !r.error) { LV.q = r.quality; paintLiveOpts(); toast(t2("Новое качество — с ближайших секунд эфира", "New quality applies to the next seconds of the stream")); } });
+async function liveClip(login, from, to) {
+  const r = await api("/api/live/clip", { login, from, to }).catch(() => ({ error: t2("Нет связи с программой", "No connection to the app") }));
+  if (r.error) { toast(r.error); return; }
+  S.dlFresh = r.key; toast(t2("Сохраняю клип…", "Saving the clip…")); pollDownloads();
+}
+$("liveList").addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-a]"); if (!b || b.disabled) return;
+  const card = b.closest(".lv"), login = card.dataset.login, w = LV.items.find((x) => x.login === login); if (!w) return;
+  const a = b.dataset.a;
+  if (a === "unwatch") { const r = await api("/api/live/unwatch", { login }); if (r.items) paintLive(r.items); toast(t2("Больше не слежу за этим эфиром", "Stopped watching this stream")); }
+  if (a === "clip") liveClip(login, Math.min(+b.dataset.s, w.buffered), 0);
+  if (a === "pick") openClipPick(w);
+  if (a === "vod") { document.querySelector('.nav [data-view="vods"]').click(); openVod({ id: b.dataset.id, title: (w.info && w.info.title) || w.name, login: w.login, recording: true }); }
+});
+
+const CP = { w: null, t0: 0, sl: rangeSlider($("cdTl"), () => paintClipPick()) };
+function paintClipPick() {
+  const st = CP.sl.st;
+  $("cdA").textContent = "−" + clock(st.len - st.a); $("cdB").textContent = st.b >= st.len - 0.5 ? t2("сейчас", "now") : "−" + clock(st.len - st.b);
+  $("cdLen").textContent = clock(st.b - st.a);
+}
+function openClipPick(w) {
+  CP.w = w; CP.t0 = Date.now();
+  const len = w.buffered;
+  $("cdTitle").textContent = t2("Клип из эфира: ", "Live clip: ") + w.name;
+  $("cdSub").textContent = t2(`В памяти ${clock(len)}. Выберите отрезок ползунками: правый край — это «сейчас».`, `${clock(len)} in memory. Pick the range with the handles: the right edge is “now”.`);
+  $("cdMin").textContent = "−" + clock(len);
+  CP.sl.set(len, Math.max(0, len - 60), len, 2); paintClipPick(); showVeil($("clipVeil"));
+}
+$("cdCancel").addEventListener("click", () => hideVeil($("clipVeil")));
+$("clipVeil").addEventListener("mousedown", (e) => { if (e.target === $("clipVeil")) hideVeil($("clipVeil")); });
+$("cdGo").addEventListener("click", () => {
+  const st = CP.sl.st, passed = (Date.now() - CP.t0) / 1000;
+  hideVeil($("clipVeil"));
+  liveClip(CP.w.login, st.len - st.a + passed, Math.max(0, st.len - st.b + passed));
+});
+
+const VD = { q: "", login: "", type: "archive", after: "", items: [], cur: null, info: null, mode: "cut", quality: "1080", sl: null };
+function vodRow(v, i) {
+  const n = document.createElement("div"); n.className = "vd"; n.style.setProperty("--d", Math.min(i, 10) * 0.04 + "s"); n.dataset.id = v.id;
+  const d = v.created ? new Date(v.created) : null;
+  const muted = v.muted && v.muted.length ? `<span class="w">${esc(t2("Twitch заглушил звук в части записи", "Twitch muted part of the audio"))}</span>` : "";
+  n.innerHTML = `<div class="vth">${v.thumb ? `<img src="${esc(v.thumb)}" alt="" loading="lazy">` : ""}<span class="dur">${clock(v.duration)}</span>${v.recording ? `<span class="tag">${esc(t2("ИДЁТ ЭФИР", "LIVE NOW"))}</span>` : ""}</div>
+    <div><h4>${esc(v.title || t2("Без названия", "Untitled"))}</h4>
+    <div class="meta">${d ? `<span>${d.toLocaleString(LOC, { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })}</span>` : ""}<span>${v.views.toLocaleString(LOC)} ${esc(t2(plural(v.views, ["просмотр", "просмотра", "просмотров"]), v.views === 1 ? "view" : "views"))}</span>${muted}</div>
+    <div class="vacts"><button class="btn slim primary" type="button" data-a="cut"><svg class="i" viewBox="0 0 24 24"><circle cx="6" cy="6" r="2.6"/><circle cx="6" cy="18" r="2.6"/><path d="M8.2 7.6 20 18M8.2 16.4 20 6"/></svg>${esc(t2("Вырезать отрезок", "Cut a range"))}</button>
+    <button class="btn slim" type="button" data-a="full"><svg class="i" viewBox="0 0 24 24"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14"/></svg>${esc(t2("Скачать целиком", "Download whole"))}</button>
+    <button class="btn slim" type="button" data-a="tw">${esc(t2("На Twitch", "On Twitch"))}</button></div></div>`;
+  return n;
+}
+function vodAlert(t) { $("vodAlert").innerHTML = t ? `<div class="alert">${esc(t)}</div>` : ""; }
+async function vodSearch(more) {
+  const q = $("vodQ").value.trim(); if (!q) { $("vodQ").focus(); return; }
+  if (/twitch\.tv\/(?:[^/]+\/)?videos?\/\d+|^v?\d{6,}$/i.test(q)) { openVod({ id: q, title: "", login: "" }); return; }
+  if (!more) { VD.after = ""; VD.items = []; $("vodList").innerHTML = `<div class="vdload"><div class="spin"></div><span>${esc(t2("Ищу записи…", "Looking for videos…"))}</span></div>`; }
+  vodAlert(""); $("vodGo").disabled = true; $("vodMore").disabled = true;
+  const r = await api("/api/vods", { login: q, type: VD.type, after: more ? VD.after : "" }).catch(() => ({ error: t2("Нет связи с программой", "No connection to the app") }));
+  $("vodGo").disabled = false; $("vodMore").disabled = false;
+  if (r.error) { vodAlert(r.error); if (!more) $("vodList").innerHTML = ""; return; }
+  if (!more) {
+    $("vodList").innerHTML = `<div class="vd-user">${r.user.avatar ? `<img src="${esc(r.user.avatar)}" alt="">` : ""}<b>${esc(r.user.name)}</b></div>`;
+    if (!r.items.length) $("vodList").insertAdjacentHTML("beforeend", `<div class="empty"><h3>${esc(t2("Записей нет", "No videos"))}</h3><p>${esc(t2("Стример не сохраняет трансляции или удалил их. Записи на Twitch хранятся от 7 до 60 дней.", "The streamer doesn’t keep broadcasts or deleted them. Twitch keeps videos for 7 to 60 days."))}</p></div>`);
+  }
+  const start = VD.items.length; VD.items.push(...r.items); VD.after = r.after;
+  r.items.forEach((v, i) => $("vodList").appendChild(vodRow(v, start + i)));
+  $("vodMore").hidden = !VD.after;
+}
+$("vodGo").addEventListener("click", () => vodSearch(false));
+$("vodQ").addEventListener("keydown", (e) => { if (e.key === "Enter") vodSearch(false); });
+$("vodMore").addEventListener("click", () => vodSearch(true));
+$("vodType").addEventListener("click", (e) => { const c = e.target.closest(".chip"); if (!c) return; VD.type = c.dataset.t; document.querySelectorAll("#vodType .chip").forEach((x) => x.classList.toggle("on", x === c)); if ($("vodQ").value.trim()) vodSearch(false); });
+$("vodList").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-a]"); if (!b) return;
+  const v = VD.items.find((x) => x.id === b.closest(".vd").dataset.id); if (!v) return;
+  if (b.dataset.a === "tw") api("/api/openurl", { url: v.url });
+  else openVod(v, b.dataset.a);
+});
+
+function vdPaint() {
+  const info = VD.info; if (!info) return;
+  const full = VD.mode === "full";
+  document.querySelectorAll("#vdMode .chip").forEach((c) => c.classList.toggle("on", c.dataset.m === VD.mode)); moveGlide($("vdMode"));
+  $("vdCut").hidden = full;
+  const st = VD.sl.st, a = full ? 0 : st.a, b = full ? info.length : st.b, len = b - a;
+  if (document.activeElement !== $("vdA")) $("vdA").value = clock(st.a);
+  if (document.activeElement !== $("vdB")) $("vdB").value = clock(st.b);
+  const q = (info.qualities || []).find((x) => x.key === VD.quality) || (info.qualities || [])[0];
+  const notes = [];
+  if (q && q.bw) notes.push(t2("Примерный размер: ", "Estimated size: ") + fmtBytes(q.bw / 8 * len));
+  if (!full && len <= 20 * 60) notes.push(t2("Отрезок обрежется точно до секунды.", "The range is cut to the exact second."));
+  else if (!full) notes.push(t2("Длинный отрезок скачается без перекодирования: границы — с точностью до ~10 секунд.", "A long range downloads without re-encoding: edges are accurate to ~10 seconds."));
+  if (info.recording) notes.push(t2("Эфир ещё идёт — в записи пока ", "The stream is still live — the video currently has ") + clock(info.length) + ".");
+  const mut = (info.muted || []).filter(([o, d]) => o < b && o + d > a);
+  if (mut.length) notes.push(`<span class="w">${esc(t2("В этом отрезке Twitch заглушил звук: ", "Twitch muted the audio in this range: "))}${mut.map(([o, d]) => clock(o) + "–" + clock(o + d)).join(", ")}</span>`);
+  $("vdNotes").innerHTML = notes.map((x) => `<div>${x.startsWith("<span") ? x : esc(x)}</div>`).join("");
+  $("vdGoT").textContent = full ? t2("Скачать целиком", "Download whole") : t2("Скачать отрезок ", "Download range ") + clock(len);
+  $("vdGo").disabled = len < 1;
+}
+function vdPaintQ() {
+  const box = $("vdQ"); box.querySelectorAll(".chip").forEach((c) => c.remove());
+  (VD.info.qualities || []).filter((q) => q.key !== "160").forEach((q) => {
+    const c = document.createElement("button"); c.type = "button"; c.className = "chip" + (q.key === VD.quality ? " on" : ""); c.dataset.q = q.key; c.textContent = q.name; box.appendChild(c);
+  });
+}
+async function openVod(v, mode) {
+  VD.cur = v; VD.info = null; VD.mode = mode === "full" ? "full" : "cut";
+  $("vdTitle").textContent = v.title || t2("Запись трансляции", "Broadcast video");
+  $("vdMeta").textContent = v.duration ? clock(v.duration) : "";
+  $("vdLoad").hidden = false; $("vdErr").hidden = true; $("vdBody").hidden = true; $("vdGo").disabled = true; $("vdGoT").textContent = t2("Скачать", "Download");
+  showVeil($("vodVeil"));
+  const r = await api("/api/vod/info", { id: v.id }).catch(() => ({ error: t2("Нет связи с программой", "No connection to the app") }));
+  if (VD.cur !== v) return;
+  $("vdLoad").hidden = true;
+  if (r.error) { $("vdErr").textContent = r.error; $("vdErr").hidden = false; return; }
+  VD.info = r; VD.cur = { ...v, ...r };
+  $("vdTitle").textContent = r.title || v.title || t2("Запись трансляции", "Broadcast video");
+  const d = r.created ? new Date(r.created) : null;
+  $("vdMeta").textContent = [r.name, d ? d.toLocaleString(LOC, { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "", clock(r.length) + (r.recording ? t2(" · эфир идёт", " · live now") : "")].filter(Boolean).join(" · ");
+  VD.quality = (r.qualities || []).some((q) => q.key === (S.quality || "1080")) ? (S.quality || "1080") : ((r.qualities || [])[0] || {}).key || "1080";
+  $("vdBody").hidden = false;
+  if (!VD.sl) VD.sl = rangeSlider($("vdTl"), () => vdPaint());
+  const len = r.length || 1, startA = r.recording ? Math.max(0, len - 120) : 0, startB = r.recording ? len : Math.min(len, 120);
+  VD.sl.set(len, startA, startB, 1);
+  $("vdLen").textContent = clock(len);
+  $("vdMutes").innerHTML = (r.muted || []).map(([o, dd]) => `<i style="left:${o / len * 100}%;width:${dd / len * 100}%"></i>`).join("");
+  const quick = r.recording ? [[60, t2("Последняя минута", "Last minute")], [300, t2("5 мин", "5 min")], [900, t2("15 мин", "15 min")]] : [];
+  $("vdQuick").innerHTML = quick.map(([s, l]) => `<button class="chip" type="button" data-last="${s}">${esc(l)}</button>`).join("");
+  vdPaintQ(); vdPaint();
+}
+$("vdQuick").addEventListener("click", (e) => { const c = e.target.closest("[data-last]"); if (!c || !VD.info) return; const len = VD.info.length; VD.sl.set(len, Math.max(0, len - +c.dataset.last), len, 1); vdPaint(); });
+$("vdMode").addEventListener("click", (e) => { const c = e.target.closest(".chip"); if (!c) return; VD.mode = c.dataset.m; vdPaint(); });
+$("vdQ").addEventListener("click", (e) => { const c = e.target.closest(".chip"); if (!c) return; VD.quality = c.dataset.q; vdPaintQ(); vdPaint(); });
+["vdA", "vdB"].forEach((id) => $(id).addEventListener("change", () => {
+  const v = parseClock($(id).value), st = VD.sl.st; if (v == null) { vdPaint(); return; }
+  if (id === "vdA") VD.sl.set(st.len, Math.min(v, st.b - 1), st.b, 1); else VD.sl.set(st.len, st.a, Math.max(v, st.a + 1), 1);
+  vdPaint();
+}));
+const vdClose = () => { VD.cur = null; hideVeil($("vodVeil")); };
+$("vdClose").addEventListener("click", vdClose); $("vdCancel").addEventListener("click", vdClose);
+$("vodVeil").addEventListener("mousedown", (e) => { if (e.target === $("vodVeil")) vdClose(); });
+$("vdGo").addEventListener("click", async () => {
+  const v = VD.cur, info = VD.info; if (!v || !info) return;
+  const full = VD.mode === "full", st = VD.sl.st;
+  const body = { id: info.id, title: info.title || v.title, login: info.login || v.login, quality: VD.quality };
+  if (!full) { body.start = Math.round(st.a * 10) / 10; body.end = Math.round(st.b * 10) / 10; }
+  $("vdGo").disabled = true;
+  const r = await api("/api/vod/download", body).catch(() => ({ error: t2("Нет связи с программой", "No connection to the app") }));
+  $("vdGo").disabled = false;
+  if (r.error) { toast(r.error); return; }
+  vdClose(); S.dlFresh = r.key; toast(full ? t2("Скачиваю запись целиком", "Downloading the whole video") : t2("Скачиваю отрезок записи", "Downloading the range")); pollDownloads();
+});
+liveRefresh();
+addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  if (isOpen($("clipVeil"))) { hideVeil($("clipVeil")); e.preventDefault(); e.stopPropagation(); }
+  else if (isOpen($("vodVeil"))) { vdClose(); e.preventDefault(); e.stopPropagation(); }
+}, true);
+
 (async function init() {
   document.body.classList.add("noanim");
   paintPeriod(); paintSel(); paintDl(); moveGlide($("sorts")); moveNav(); drawChart();
@@ -3236,6 +4217,18 @@ class DownloadQueue:
             self.cv.notify_all()
         return keys
 
+    def add_task(self, kind, title, src):
+        with self.cv:
+            self.seq += 1
+            key = f"{kind}-{self.seq}"
+            self.items.append({"key": key, "id": key, "title": title, "pct": 0, "state": "wait", "path": "", "error": "",
+                               "quality": src.get("quality", ""), "kind": kind, "note": "", "_kind": kind, "_src": src})
+            if self.thread is None or not self.thread.is_alive():
+                self.thread = threading.Thread(target=self.work, daemon=True)
+                self.thread.start()
+            self.cv.notify_all()
+        return key
+
     def find(self, key):
         return next((it for it in self.items if it["key"] == key), None)
 
@@ -3278,13 +4271,20 @@ class DownloadQueue:
 
                 def prog(p, it=it):
                     it["pct"] = p
-                path = download_clip({"id": src["id"], "title": src["title"], "broadcaster": src["broadcaster"]}, folder,
-                                     progress=prog, cancel=ev, start=src["start"], end=src["end"], quality=it["quality"])
+                kind = it.get("_kind", "clip")
+                if kind == "vod":
+                    path, note = download_vod(src, folder, progress=prog, cancel=ev)
+                    it["note"] = note
+                elif kind == "live":
+                    path, note = save_live_clip(self.ctx, src, folder, progress=prog, cancel=ev)
+                else:
+                    path = download_clip({"id": src["id"], "title": src["title"], "broadcaster": src["broadcaster"]}, folder,
+                                         progress=prog, cancel=ev, start=src["start"], end=src["end"], quality=it["quality"])
                 it.update(path=path, pct=100, state="done")
             except Cancelled:
                 it.update(state="stop", pct=0)
             except Exception as e:
-                log(f"download {src['id']}: {e!r}")
+                log(f"download {src.get('id', '')}: {e!r}")
                 it.update(state="fail", error=str(e))
             finally:
                 it.pop("_ev", None)
@@ -3308,6 +4308,20 @@ class Ctx:
         self.quit = threading.Event()
         self.lock = threading.Lock()
         self.dlq = DownloadQueue(self)
+        self.live = {}
+        clean_live_temp()
+
+    def live_keep(self):
+        v = self.cfg.get("live_keep", 5)
+        return v if v in LIVE_KEEP else 5
+
+    def live_quality(self):
+        v = str(self.cfg.get("live_quality", "1080"))
+        return v if v in LIVE_QUALITIES else "1080"
+
+    def stop_live(self):
+        for w in list(self.live.values()):
+            w.stop.set()
 
     def twitch(self):
         if getattr(self, "_tw", None) is None:
@@ -3478,7 +4492,7 @@ def folder_info(folder):
         with os.scandir(folder) as it:
             for e in it:
                 n = e.name.lower()
-                if e.is_file() and n.endswith(".mp4") and ".part" not in n:
+                if e.is_file() and (n.endswith(".mp4") or n.endswith(".m4a")) and ".part" not in n:
                     st = e.stat()
                     total += st.st_size
                     files.append((st.st_mtime, e.name, st.st_size, e.path))
@@ -3613,6 +4627,8 @@ def make_handler(ctx):
             if path == "/api/download/clear":
                 ctx.dlq.clear()
                 return {"items": ctx.dlq.view()}
+            if path.startswith("/api/live/") or path.startswith("/api/vod"):
+                return self.live_route(path, b)
             if path == "/api/clipurl":
                 cid = str(b.get("id", ""))
                 if not re.fullmatch(r"[A-Za-z0-9_-]+", cid):
@@ -3673,7 +4689,7 @@ def make_handler(ctx):
                 p = os.path.realpath(str(b.get("path", "")))
                 root = os.path.realpath(ctx.download_dir())
                 if (not p.startswith(root + os.sep) or not os.path.isfile(p)
-                        or os.path.splitext(p)[1].lower() not in (".mp4", ".csv")):
+                        or os.path.splitext(p)[1].lower() not in (".mp4", ".m4a", ".csv")):
                     raise ValueError("Файл не найден: возможно, его переместили или удалили.")
                 if sys.platform.startswith("win"):
                     os.startfile(p)
@@ -3685,6 +4701,98 @@ def make_handler(ctx):
                 os.makedirs(p if not os.path.splitext(p)[1] else os.path.dirname(p), exist_ok=True)
                 reveal(p)
                 return {"ok": True}
+            raise ValueError("Неизвестная команда.")
+
+        def live_route(self, path, b):
+            tw = ctx.twitch()
+            if path == "/api/live/list":
+                return {"items": [w.view() for w in ctx.live.values()], "keep": ctx.live_keep(), "quality": ctx.live_quality()}
+            if path == "/api/live/watch":
+                login = parse_login(b.get("login"))
+                if not login:
+                    raise ValueError(L("Впишите ник стримера или ссылку на канал.", "Enter a streamer name or a channel link."))
+                if login not in ctx.live:
+                    if len(ctx.live) >= 4:
+                        raise ValueError(L("Можно следить максимум за 4 каналами сразу.", "You can watch up to 4 channels at once."))
+                    ctx.live[login] = LiveWatch(ctx, login, tw.user(login))
+                return {"items": [w.view() for w in ctx.live.values()]}
+            if path == "/api/live/unwatch":
+                w = ctx.live.pop(parse_login(b.get("login")), None)
+                if w:
+                    w.stop.set()
+                return {"items": [w.view() for w in ctx.live.values()]}
+            if path == "/api/live/settings":
+                if b.get("keep") in LIVE_KEEP:
+                    ctx.cfg["live_keep"] = b["keep"]
+                    for w in ctx.live.values():
+                        w.keep = b["keep"]
+                if str(b.get("quality", "")) in LIVE_QUALITIES:
+                    ctx.cfg["live_quality"] = str(b["quality"])
+                    for w in ctx.live.values():
+                        w.quality, w.media = str(b["quality"]), None
+                save_config(ctx.cfg)
+                return {"keep": ctx.live_keep(), "quality": ctx.live_quality()}
+            if path == "/api/live/clip":
+                login = parse_login(b.get("login"))
+                w = ctx.live.get(login)
+                if not w:
+                    raise ValueError(L("Этот канал не отслеживается.", "This channel is not being watched."))
+                a, z = float(b.get("from") or 0), float(b.get("to") or 0)
+                if not (a > z >= 0) or a - z > 16 * 60:
+                    raise ValueError(L("Неверный отрезок.", "Invalid range."))
+                title = L(f"{w.name} — клип эфира, {clock(a - z)}", f"{w.name} — live clip, {clock(a - z)}")
+                key = ctx.dlq.add_task("live", title, {"login": login, "from": a, "to": z, "id": login})
+                return {"key": key}
+            if path == "/api/vods":
+                login = parse_login(b.get("login"))
+                if not login:
+                    raise ValueError(L("Впишите ник стримера или ссылку на канал.", "Enter a streamer name or a channel link."))
+                u = tw.user(login)
+                params = {"user_id": u["id"], "type": str(b.get("type") or "archive"), "first": 20}
+                if params["type"] not in ("archive", "highlight", "upload", "all"):
+                    params["type"] = "archive"
+                if b.get("after"):
+                    params["after"] = str(b["after"])
+                d = tw.get("/videos", params)
+                live = tw.get("/streams", {"user_id": u["id"]}).get("data") or []
+                sid = str(live[0].get("id")) if live else ""
+                items = [video_json(v) for v in d.get("data") or []]
+                for v in items:
+                    v["recording"] = bool(sid) and v["streamId"] == sid
+                return {"user": {"login": u["login"], "name": u.get("display_name") or u["login"], "avatar": u.get("profile_image_url") or ""},
+                        "items": items, "after": (d.get("pagination") or {}).get("cursor") or ""}
+            if path == "/api/vod/info":
+                vid = parse_vod_id(b.get("id"))
+                if not vid:
+                    raise ValueError(L("Вставьте ссылку на запись, например twitch.tv/videos/123456789.", "Paste a video link, e.g. twitch.tv/videos/123456789."))
+                d = tw.get("/videos", {"id": vid}).get("data") or []
+                if not d:
+                    raise TwitchError(L("Запись не найдена: возможно, её удалили.", "Video not found: it may have been deleted."))
+                v = video_json(d[0])
+                vs = vod_master(vid)
+                v["qualities"] = quality_list(vs)
+                best = pick_variant(vs, "1080")
+                pl = parse_media(web_get(best["url"]).decode("utf-8", "replace"), best["url"])
+                v["length"] = round(sum(s["dur"] for s in pl["segs"]), 1)
+                v["recording"] = not pl["ended"]
+                return v
+            if path == "/api/vod/download":
+                vid = parse_vod_id(b.get("id"))
+                if not vid:
+                    raise ValueError(L("Неверная запись.", "Invalid video."))
+                q = str(b.get("quality") or "1080")
+                if q not in VOD_QUALITIES:
+                    q = "1080"
+                st, en = b.get("start"), b.get("end")
+                st = None if st in (None, "") else max(0.0, float(st))
+                en = None if en in (None, "") else float(en)
+                if st is not None and en is not None and en <= st:
+                    raise ValueError(L("Конец отрезка должен быть позже начала.", "The end must be after the start."))
+                title = str(b.get("title") or "VOD")[:120]
+                part = f" ({clock(st or 0)}–{clock(en) if en is not None else L('конец', 'end')})" if (st is not None or en is not None) else ""
+                key = ctx.dlq.add_task("vod", L("Запись: ", "Video: ") + title + part,
+                                       {"id": vid, "title": title, "login": str(b.get("login") or ""), "start": st, "end": en, "quality": q})
+                return {"key": key}
             raise ValueError("Неизвестная команда.")
 
         def search(self, b):
@@ -3872,10 +4980,11 @@ def serve(port, token):
         now = time.time()
         if ctx.bye_at and now > ctx.bye_at:
             break
-        if ctx.seen_ping and now - ctx.last_ping > 40:
+        if ctx.seen_ping and now - ctx.last_ping > 150:
             break
         if not ctx.seen_ping and now - started > 180:
             break
+    ctx.stop_live()
     srv.shutdown()
 
 def arg_value(name):
