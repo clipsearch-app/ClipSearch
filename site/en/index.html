@@ -13,15 +13,14 @@
 <meta property="og:title" content="ClipSearch — search and download Twitch clips">
 <meta property="og:description" content="Find a Twitch clip in a minute and download it in 1080p. Free, no sign-in.">
 <meta property="og:url" content="https://clip-search.com/en/">
-<meta property="og:image" content="https://clip-search.com/og-en.jpg">
+<meta property="og:image" content="https://clip-search.com/og-en.jpg?v=4">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="theme-color" content="#070b1f">
 <link rel="icon" href="../logo.svg" type="image/svg+xml">
 <link rel="preload" href="/fonts/onest-cyrillic.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="/fonts/onest-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preconnect" href="https://api.clip-search.com">
-<style>
-@font-face{font-family:Onest;font-style:normal;font-weight:300 700;font-display:swap;src:url(/fonts/onest-cyrillic-ext.woff2) format('woff2');unicode-range:U+0460-052F,U+1C80-1C8A,U+20B4,U+2DE0-2DFF,U+A640-A69F,U+FE2E-FE2F}
+<style>@font-face{font-family:Onest;font-style:normal;font-weight:300 700;font-display:swap;src:url(/fonts/onest-cyrillic-ext.woff2) format('woff2');unicode-range:U+0460-052F,U+1C80-1C8A,U+20B4,U+2DE0-2DFF,U+A640-A69F,U+FE2E-FE2F}
 @font-face{font-family:Onest;font-style:normal;font-weight:300 700;font-display:swap;src:url(/fonts/onest-cyrillic.woff2) format('woff2');unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
 @font-face{font-family:Onest;font-style:normal;font-weight:300 700;font-display:swap;src:url(/fonts/onest-latin-ext.woff2) format('woff2');unicode-range:U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C4,U+2113,U+2C60-2C7F,U+A720-A7FF}
 @font-face{font-family:Onest;font-style:normal;font-weight:300 700;font-display:swap;src:url(/fonts/onest-latin.woff2) format('woff2');unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
@@ -56,7 +55,7 @@ body {
     linear-gradient(180deg, var(--sky-0) 0%, var(--sky-1) 45%, var(--sky-0) 100%);
   overflow-x: hidden;
 }
-body::after {
+body::after { /* звёзды, как на фоне программы */
   content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 0; opacity: .55;
   background-image:
     radial-gradient(1px 1px at 12% 18%, #fff 50%, transparent 51%), radial-gradient(1px 1px at 33% 72%, #cfd8ff 50%, transparent 51%),
@@ -71,6 +70,7 @@ a { color: inherit; }
   padding-left: max(20px, env(safe-area-inset-left, 0px)); padding-right: max(20px, env(safe-area-inset-right, 0px)); }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 8px; }
 
+/* шапка */
 .top { display: flex; align-items: center; gap: 28px; padding-block: 22px; }
 .brand { display: flex; align-items: center; gap: 12px; text-decoration: none; font-size: 22px; letter-spacing: -.01em; }
 .brand svg { width: 38px; height: 38px; flex: none; }
@@ -82,6 +82,7 @@ a { color: inherit; }
   border: 1px solid var(--line-strong); background: rgba(30, 44, 98, .45); transition: border-color .2s, background .2s; }
 .btn-sm:hover { border-color: var(--accent); background: rgba(48, 66, 150, .55); }
 
+/* герой */
 .hero { display: grid; justify-items: center; text-align: center; padding-block: 56px 40px; gap: 22px; }
 .eyebrow { display: inline-flex; align-items: center; gap: 10px; padding: 7px 14px 7px 10px; border-radius: 999px; font-size: 14px; color: var(--muted);
   border: 1px solid var(--line); background: rgba(17, 26, 62, .5); }
@@ -104,6 +105,7 @@ h1 em { font-style: normal; font-weight: 700;
 .req { margin: 0; font-size: 14px; color: var(--faint); }
 .req a { color: var(--muted); }
 
+/* окно программы */
 .stage { position: relative; perspective: 1600px; margin-top: 30px; width: 100%; }
 .stage::before { content: ""; position: absolute; inset: 8% 6% -4%; border-radius: 40px; filter: blur(60px);
   background: radial-gradient(closest-side, rgba(91, 124, 255, .55), rgba(122, 99, 255, .25) 60%, transparent); z-index: -1; }
@@ -117,6 +119,7 @@ h1 em { font-style: normal; font-weight: 700;
 @keyframes rise { from { transform: translateY(26px) rotateX(18deg); opacity: .4; } }
 .ridge { display: block; width: 100%; height: 120px; margin-top: -60px; position: relative; z-index: -1; }
 
+/* разделы */
 section { padding-block: 70px; }
 .head { display: grid; gap: 10px; margin-bottom: 34px; max-width: 46em; }
 .kicker { font-size: 13px; letter-spacing: .12em; text-transform: uppercase; color: var(--accent); font-weight: 600; }
@@ -140,6 +143,7 @@ h2 b { font-weight: 650; }
 .chip { font-size: 13px; padding: 4px 10px; border-radius: 999px; background: rgba(91, 124, 255, .16); border: 1px solid rgba(150, 172, 255, .22); color: #cfd8ff; }
 kbd { font-family: var(--font); font-size: 12.5px; padding: 2px 7px; border-radius: 6px; border: 1px solid var(--line-strong); background: rgba(12, 18, 54, .6); color: var(--text); }
 
+/* установка */
 .steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; counter-reset: s; }
 .step { padding: 26px; display: grid; gap: 10px; align-content: start; }
 .step .n { counter-increment: s; width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; font-weight: 600; font-size: 15px;
@@ -150,6 +154,7 @@ kbd { font-family: var(--font); font-size: 12.5px; padding: 2px 7px; border-radi
 .step .warn { margin-top: 6px; padding: 12px 14px; border-radius: var(--r-sm); background: rgba(12, 18, 54, .55); border: 1px dashed var(--line-strong); font-size: 14px; color: var(--muted); }
 .step .warn b { color: var(--text); font-weight: 500; }
 
+/* версии */
 .log { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 0; padding: 8px 0; overflow: hidden; }
 .log > div { padding: 22px 28px; border-top: 1px solid var(--line); }
 .log > div:nth-child(-n+2) { border-top: 0; }
@@ -160,6 +165,7 @@ kbd { font-family: var(--font); font-size: 12.5px; padding: 2px 7px; border-radi
 .log ul { margin: 0; padding-left: 18px; color: var(--muted); display: grid; gap: 6px; }
 .log li::marker { color: var(--accent); }
 
+/* вопросы */
 .faq { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 details { padding: 20px 24px; }
 summary { cursor: pointer; list-style: none; font-weight: 600; font-size: 17px; display: flex; justify-content: space-between; gap: 16px; }
@@ -168,6 +174,7 @@ summary::after { content: "+"; color: var(--accent); font-weight: 400; font-size
 details[open] summary::after { transform: rotate(45deg); }
 details p { margin: 12px 0 0; color: var(--muted); font-size: 15px; }
 
+/* низ */
 .final { text-align: center; display: grid; justify-items: center; gap: 18px; padding: 54px 24px; margin-top: 10px; }
 .final h2 { max-width: 18ch; }
 footer { padding-block: 36px 48px; color: var(--faint); font-size: 14px; display: flex; flex-wrap: wrap; gap: 10px 24px; justify-content: space-between; border-top: 1px solid var(--line); margin-top: 40px; }
@@ -195,6 +202,7 @@ footer a { color: var(--muted); }
   html { scroll-behavior: auto; }
 }
 
+/* поиск на сайте */
 .hero { padding-block: 46px 26px; }
 .tool { padding: 22px; display: grid; gap: 14px; position: relative; }
 .row { display: grid; gap: 12px; }
@@ -281,6 +289,7 @@ footer a { color: var(--muted); }
 .appsec .stage { margin-top: 10px; }
 .appsec .req { margin-top: 14px; }
 
+/* всплывающие окна */
 .veil { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 20px; background: rgba(3, 6, 20, .72);
   -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); animation: fade .25s both; }
 @keyframes fade { from { opacity: 0; } }
@@ -344,6 +353,7 @@ footer a { color: var(--muted); }
 .ostabs button:hover { color: var(--text); }
 .ostabs button.on { color: #fff; background: linear-gradient(135deg, #7290ff, #5b7cff 55%, #7a63ff); box-shadow: 0 8px 22px rgba(80, 110, 255, .35); }
 
+/* записи трансляций */
 .modes { display: flex; gap: 6px; width: max-content; max-width: 100%; padding: 5px; border-radius: 999px; border: 1px solid var(--line); background: rgba(8, 12, 40, .5); }
 .modes button { display: inline-flex; align-items: center; gap: 8px; font: inherit; font-size: 15px; font-weight: 600; color: var(--muted); background: none; border: 0; border-radius: 999px; padding: 9px 18px; cursor: pointer; transition: color .2s, background .2s, box-shadow .2s; }
 .modes button .i { stroke: currentColor; }
@@ -400,9 +410,7 @@ footer a { color: var(--muted); }
 .vdl .rs-scale { margin-bottom: 4px; }
 .vdl .vlocks .lockbtn { height: auto; min-height: 34px; padding: 6px 13px; font-size: 13.5px; text-align: left; line-height: 1.3; }
 </style>
-<script type="application/ld+json">
-{"@context":"https://schema.org","@type":"SoftwareApplication","name":"ClipSearch","operatingSystem":"Windows 10, Windows 11, macOS 11","applicationCategory":"MultimediaApplication","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"url":"https://clip-search.com/","downloadUrl":"https://github.com/clipsearch-app/ClipSearch/releases/latest/download/ClipSearchSetup.exe"}
-</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"ClipSearch","operatingSystem":"Windows 10, Windows 11, macOS 11","applicationCategory":"MultimediaApplication","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"url":"https://clip-search.com/","downloadUrl":"https://github.com/clipsearch-app/ClipSearch/releases/latest/download/ClipSearchSetup.exe"}</script>
 </head>
 <body>
 
@@ -579,7 +587,7 @@ footer a { color: var(--muted); }
     </div>
     <div class="stage">
       <div class="win" id="win">
-        <img src="../shot-en.webp" alt="ClipSearch window: 76 clips found for two streamers over 7 days, two clips selected for download in 1080p" width="1600" height="1019" loading="lazy">
+        <img src="../shot-en.webp?v=4" alt="ClipSearch window: 76 clips found for two streamers over 7 days, two clips selected for download in 1080p" width="1600" height="1019" loading="lazy">
         <div class="shine"></div>
       </div>
     </div>
@@ -758,11 +766,12 @@ footer a { color: var(--muted); }
 
   <footer>
     <span>ClipSearch is an independent app, not affiliated with Twitch. Users are responsible for how they use downloaded videos — please respect creators’ rights.</span>
-    <span><button type="button" class="linkbtn" data-report>Report a problem</button> · <a href="https://t.me/ClipSearch" target="_blank" rel="noopener">Project Telegram channel</a> · <a href="https://github.com/clipsearch-app/ClipSearch/releases">All versions</a> · <a href="https://github.com/clipsearch-app/ClipSearch">Source code</a></span>
+    <span><button type="button" class="linkbtn" data-report>Report a problem</button> · <a href="https://t.me/ClipSearch" target="_blank" rel="noopener">Project Telegram channel</a> · <a href="https://github.com/clipsearch-app/ClipSearch/releases">All versions</a> · <a href="https://github.com/clipsearch-app/ClipSearch">Source code</a> · <a href="privacy/">Privacy</a></span>
   </footer>
 </div>
 
 <script>
+// окно программы чуть поворачивается за курсором — как превью клипов в самой программе
 (function () {
   const win = document.getElementById("win");
   if (!win || matchMedia("(prefers-reduced-motion: reduce)").matches || matchMedia("(hover: none)").matches) return;
