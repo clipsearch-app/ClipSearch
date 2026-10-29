@@ -1617,7 +1617,9 @@ body {
 }
 button, input, select { font: inherit; color: inherit; }
 button { cursor: pointer; }
-:focus-visible { outline: 2px solid #9db0ff; outline-offset: 2px; }
+:focus-visible { outline: none; }
+.nav button:focus-visible .ic { border-color: rgba(157, 176, 255, 0.55); }
+.chip:focus-visible, .btn:focus-visible, .switch:focus-visible .tr { border-color: rgba(157, 176, 255, 0.55); }
 svg.i { width: 1em; height: 1em; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex: none; }
 
 #stars { position: fixed; inset: 0; pointer-events: none; }
@@ -2611,7 +2613,7 @@ input[type=range].rg:disabled { opacity: .4; }
             <button class="btn danger" id="stop" hidden>Остановить</button>
             <button class="btn ghostbtn" id="reset" title="Очистить все поля и вернуть период «7 дней»">Сбросить</button>
             <button class="switch" id="deep" role="switch" aria-checked="false" title="Период режется на недельные куски: находит больше старых и непопулярных клипов, но поиск идёт дольше"><span class="tr"></span>Глубокий поиск</button>
-            <div class="seg solid ccseg" id="ccSeg" title="Субтитры Twitch на клипе: автоматические или добавленные стримером"><span class="lbl">Субтитры</span><button class="chip on" type="button" data-cc="">Любые</button><button class="chip" type="button" data-cc="yes">Есть</button><button class="chip" type="button" data-cc="no">Нет</button></div>
+            <div class="seg solid ccseg" id="ccSeg"><span class="lbl">Субтитры</span><button class="chip on" type="button" data-cc="">Любые</button><button class="chip" type="button" data-cc="yes">Есть</button><button class="chip" type="button" data-cc="no">Нет</button></div>
             <span class="hint" id="goHint"></span>
           </div>
         </div>
