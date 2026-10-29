@@ -183,7 +183,7 @@ jobs:
           sudo installer -pkg py.pkg -target / > /dev/null
           PY=/Library/Frameworks/Python.framework/Versions/3.12/bin/python3
           echo "PY=$PY" >> "$GITHUB_ENV"
-          $PY -m pip install --quiet pyinstaller
+          $PY -m pip install --quiet pyinstaller certifi
           $PY -c "import platform, sys; print(platform.machine(), sys.version)"
           $PY clip_search.py --selftest
           echo "APP_VERSION=$($PY clip_search.py --version)" >> "$GITHUB_ENV"
@@ -245,10 +245,17 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$A"
           du -sh "$A"
 
+      - name: Hide the build Python (the app must not depend on it)
+        run: |
+          sudo mv /Library/Frameworks/Python.framework /Library/Frameworks/Python.framework.off
+          echo "PY=/usr/bin/false" >> "$GITHUB_ENV"
+
       - name: Check the engine
         run: |
           B=out/ClipSearch.app/Contents/Resources/backend/clip_backend
           $B --selftest
+          env -i HOME="$HOME" PATH=/usr/bin:/bin "$B" --nettest || { echo "::error::Mac engine cannot reach the ClipSearch server (clean environment)"; exit 1; }
+          env -i HOME="$HOME" PATH=/usr/bin:/bin arch -x86_64 "$B" --nettest && echo "::notice::Intel engine reaches the server" || echo "::warning::Intel net check failed"
           arch -x86_64 $B --version && echo "::notice::Intel engine runs (Rosetta)" || echo "::warning::Intel engine not checked"
 
       - name: Check the window opens
