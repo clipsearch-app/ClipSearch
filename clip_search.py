@@ -884,7 +884,7 @@ def quality_list(vs):
 
 CHAT_FPS = 30
 CHAT_SLIDE = 0.28
-CHAT_POS = ("tl", "tr", "bl", "br")
+CHAT_POS = ("tl", "tr", "ml", "mr", "bl", "br")
 CHAT_DEFAULT = {"mode": "overlay", "pos": "br", "size": 100, "height": 40, "bg": True, "opacity": 60}
 
 
@@ -1458,8 +1458,8 @@ def add_chat(video_path, vod_id, channel_id, start, style, cancel=None, progress
         return video_path, out, len(msgs)
     fs, cw, ch, m = chat_geom(w, h, st)
     rend = ChatRenderer(msgs, cw, ch, channel_id, fs=fs, bg=st["bg"], opacity=st["opacity"], top=top, cancel=cancel)
-    x = str(m) if st["pos"] in ("tl", "bl") else f"main_w-overlay_w-{m}"
-    y = str(m) if top else f"main_h-overlay_h-{m}"
+    x = str(m) if st["pos"] in ("tl", "ml", "bl") else f"main_w-overlay_w-{m}"
+    y = str(m) if top else ("(main_h-overlay_h)/2" if st["pos"] in ("ml", "mr") else f"main_h-overlay_h-{m}")
     tmp = video_path + (".chat.mp4" if ".part" in video_path else ".part.chat.mp4")
     cmd = [ff, "-hide_banner", "-y", "-loglevel", "error", "-i", video_path, "-f", "rawvideo", "-pix_fmt", "rgba", "-s", f"{cw}x{ch}", "-r", str(CHAT_FPS), "-i", "pipe:0",
            "-filter_complex", f"[0:v][1:v]overlay=x={x}:y={y}:eof_action=repeat:format=auto,format=yuv420p[v]", "-map", "[v]", "-map", "0:a?",
@@ -2454,7 +2454,7 @@ body.glass-os .vd { background: linear-gradient(150deg, rgba(60, 82, 180, 0.16),
 .crow .lbl.short { width: auto; }
 .crow .seg { flex-wrap: nowrap; }
 .cprev .cpnote { left: 50%; transform: translateX(-50%); }
-.cpos { display: grid; grid-template-columns: repeat(2, 38px); grid-template-rows: repeat(2, 24px); gap: 4px; padding: 4px; border-radius: 10px; border: 1px solid var(--line); background: rgba(8, 13, 38, 0.6); }
+.cpos { display: grid; grid-template-columns: repeat(2, 38px); grid-template-rows: repeat(3, 18px); gap: 4px; padding: 4px; border-radius: 10px; border: 1px solid var(--line); background: rgba(8, 13, 38, 0.6); }
 .cpos button { border-radius: 6px; border: 1px solid rgba(150, 172, 255, 0.16); background: rgba(30, 44, 98, 0.35); padding: 0; transition: background .2s, border-color .2s, box-shadow .2s; }
 .cpos button:hover { border-color: #8aa0ff; }
 .cpos button.on { background: linear-gradient(180deg, #5a7bff, #3f5ee8); border-color: transparent; box-shadow: 0 0 12px rgba(80, 110, 255, 0.5); }
@@ -2746,7 +2746,7 @@ input[type=range].rg:disabled { opacity: .4; }
     <div class="ph"><h2 id="chTitle">Чат на видео</h2><button class="xbtn" id="chClose" type="button" aria-label="Закрыть"><svg class="i" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
     <div class="cprev" id="cPrev"><img id="cPrevImg" alt="" hidden><div class="cvhost" id="cHost"></div><span class="cpnote">Пример</span></div>
     <div class="cgrid">
-      <div class="crow wide"><span class="lbl">Как добавить</span><div class="seg solid" id="cMode"><button class="chip" type="button" data-v="overlay">Поверх видео</button><button class="chip" type="button" data-v="file">Отдельным файлом</button></div><span class="grow"></span><span class="lbl short">Угол</span><div class="cpos" id="cPos"><button type="button" data-v="tl" title="Слева сверху"></button><button type="button" data-v="tr" title="Справа сверху"></button><button type="button" data-v="bl" title="Слева снизу"></button><button type="button" data-v="br" title="Справа снизу"></button></div></div>
+      <div class="crow wide"><span class="lbl">Как добавить</span><div class="seg solid" id="cMode"><button class="chip" type="button" data-v="overlay">Поверх видео</button><button class="chip" type="button" data-v="file">Отдельным файлом</button></div><span class="grow"></span><span class="lbl short">Положение</span><div class="cpos" id="cPos"><button type="button" data-v="tl" title="Слева сверху"></button><button type="button" data-v="tr" title="Справа сверху"></button><button type="button" data-v="ml" title="Слева по центру"></button><button type="button" data-v="mr" title="Справа по центру"></button><button type="button" data-v="bl" title="Слева снизу"></button><button type="button" data-v="br" title="Справа снизу"></button></div></div>
       <label class="crow"><span class="lbl">Размер</span><input class="rg" type="range" id="cSize" min="50" max="200" step="5"><b id="cSizeV"></b></label>
       <label class="crow"><span class="lbl">Высота</span><input class="rg" type="range" id="cHeight" min="15" max="100" step="5"><b id="cHeightV"></b></label>
       <div class="crow"><span class="lbl">Фон</span><button class="switch" type="button" role="switch" aria-checked="true" id="cBg"><span class="tr"></span><span id="cBgT">Есть</span></button></div>
@@ -2886,7 +2886,7 @@ const RULES = [
   [/^Не удалось получить ссылку на скачивание клипа (.+)\.$/, "Couldn’t get a download link for clip $1."], [/^Неожиданная ошибка: (.*)$/, "Unexpected error: $1"],
   [/^Слишком много запросов, подождите минуту\.$/, "Too many requests, please wait a minute."],
 ];
-Object.assign(EN, {"Чат на видео": "Chat on video", "Пример": "Example", "Как добавить": "How to add", "Поверх видео": "On the video", "Угол": "Corner", "Слева сверху": "Top left", "Справа сверху": "Top right", "Слева снизу": "Bottom left", "Справа снизу": "Bottom right", "Размер": "Size", "Высота": "Height", "Фон": "Background", "Есть": "On", "Плотность фона": "Background density", "Сбросить": "Reset", "Готово": "Done", "Настроить чат: размер, фон, положение": "Chat settings: size, background, position"});
+Object.assign(EN, {"Чат на видео": "Chat on video", "Пример": "Example", "Как добавить": "How to add", "Поверх видео": "On the video", "Угол": "Corner", "Положение": "Position", "Слева по центру": "Middle left", "Справа по центру": "Middle right", "Слева сверху": "Top left", "Справа сверху": "Top right", "Слева снизу": "Bottom left", "Справа снизу": "Bottom right", "Размер": "Size", "Высота": "Height", "Фон": "Background", "Есть": "On", "Плотность фона": "Background density", "Сбросить": "Reset", "Готово": "Done", "Настроить чат: размер, фон, положение": "Chat settings: size, background, position"});
 Object.assign(EN, {"Чат трансляции": "Stream chat", "Справа": "Right", "Слева": "Left", "Отдельным файлом": "Separate file", "Добавить к видео чат трансляции — каким он был в этот момент. Чат берётся из записи эфира.": "Add the stream chat to the video — as it was at that moment. The chat comes from the broadcast video."});
 Object.assign(EN, {"Эфир": "Live", "Записи": "Videos", "Клипы из": "Clips from the", "эфира": "stream", "Добавьте стримера — приложение будет держать в памяти последние минуты трансляции вместе со звуком, даже если там играет музыка. Случился момент — нажмите «Клип».": "Add a streamer — the app keeps the last minutes of the broadcast in memory with the sound, even when music is playing. When the moment happens, press “Clip”.", "Ник стримера или ссылка на канал": "Streamer name or channel link", "Следить за эфиром": "Watch the stream", "Держать в памяти": "Keep in memory", "2 мин": "2 min", "5 мин": "5 min", "10 мин": "10 min", "15 мин": "15 min", "Качество": "Quality", "Пока канал в списке, приложение смотрит эфир в фоне: трафик как при обычном просмотре, около 3 ГБ в час в 1080p. Рекламные вставки Twitch в клипы не попадают.": "While a channel is on the list, the app watches the stream in the background: traffic is like normal viewing, about 3 GB per hour in 1080p. Twitch ad breaks don’t end up in clips.", "Здесь появятся эфиры": "Streams will appear here", "Впишите стримера и нажмите «Следить за эфиром». Можно следить за четырьмя каналами сразу.": "Enter a streamer and press “Watch the stream”. You can watch four channels at once.", "трансляций": "of past streams", "Скачайте запись эфира целиком или вырежьте нужный кусок — даже у эфира, который ещё идёт. Видео качается прямо с Twitch.": "Download a whole broadcast or cut out the part you need — even from a stream that is still live. The video downloads straight from Twitch.", "Ник стримера или ссылка на запись (twitch.tv/videos/…)": "Streamer name or video link (twitch.tv/videos/…)", "Найти записи": "Find videos", "Показывать": "Show", "Трансляции": "Broadcasts", "Хайлайты": "Highlights", "Загруженные": "Uploads", "Здесь появятся записи": "Videos will appear here", "Впишите стримера — покажем его последние трансляции. Или вставьте ссылку на конкретную запись.": "Enter a streamer to see their recent broadcasts. Or paste a link to a specific video.", "Клип из эфира": "Live clip", "Начало клипа": "Clip start", "Конец клипа": "Clip end", "сейчас": "now", "Начало:": "Start:", "Конец:": "End:", "Длина клипа:": "Clip length:", "Отмена": "Cancel", "Сохранить клип": "Save clip", "Узнаю длину записи и доступные качества…": "Checking the video length and available qualities…", "Отрезок": "Range", "Целиком": "Whole", "Начало отрезка": "Range start", "Конец отрезка": "Range end", "Скачать": "Download"});
 function tr(s) {
@@ -4362,8 +4362,8 @@ class ChatView {
     if (force || !old || old.fs !== g.fs || old.cw !== g.cw) { this.rows.forEach((r) => r.el.remove()); this.rows.clear(); }
     const { fs, cw, ch, m } = g;
     this.pad = Math.round(fs * 0.6); this.line = Math.round(fs * 1.45); this.ih = Math.round(fs * 1.3); this.gap = Math.max(2, Math.floor(fs / 5));
-    const top = st.pos === "tl" || st.pos === "tr", left = st.pos === "tl" || st.pos === "bl";
-    Object.assign(this.box.style, { width: cw + "px", height: ch + "px", left: (left ? m : this.VW - cw - m) + "px", top: (top ? m : this.VH - ch - m) + "px" });
+    const top = st.pos === "tl" || st.pos === "tr", left = st.pos[1] === "l", mid = st.pos[0] === "m";
+    Object.assign(this.box.style, { width: cw + "px", height: ch + "px", left: (left ? m : this.VW - cw - m) + "px", top: (top ? m : mid ? Math.floor((this.VH - ch) / 2) : this.VH - ch - m) + "px" });
     this.host.style.width = this.VW + "px"; this.host.style.height = this.VH + "px";
     const o = Math.max(2, Math.floor(fs / 9)), sh = [];
     for (let a = 0; a < 16; a++) sh.push(`${(Math.cos(a / 8 * Math.PI) * o).toFixed(1)}px ${(Math.sin(a / 8 * Math.PI) * o).toFixed(1)}px 0 rgba(0,0,0,.92)`);
@@ -4441,7 +4441,7 @@ function cpTick() {
   CP.raf = requestAnimationFrame(cpTick);
 }
 function chatSummary(st) {
-  const pos = { tl: t2("слева сверху", "top left"), tr: t2("справа сверху", "top right"), bl: t2("слева снизу", "bottom left"), br: t2("справа снизу", "bottom right") }[st.pos];
+  const pos = { tl: t2("слева сверху", "top left"), tr: t2("справа сверху", "top right"), ml: t2("слева по центру", "middle left"), mr: t2("справа по центру", "middle right"), bl: t2("слева снизу", "bottom left"), br: t2("справа снизу", "bottom right") }[st.pos];
   const where = st.mode === "file" ? t2("отдельным файлом", "separate file") : pos;
   return `<b>${esc(where[0].toUpperCase() + where.slice(1))}</b> · ${st.size}% · ${esc(st.bg ? t2("с фоном", "background") : t2("без фона", "no background"))}`;
 }
