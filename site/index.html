@@ -1317,7 +1317,11 @@ footer a { color: var(--muted); }
     body.querySelectorAll("[data-last]").forEach((b) => b.addEventListener("click", () => { sl.set(len, Math.max(0, len - +b.dataset.last), len); paint(); }));
     [["va", "a"], ["vb", "b"]].forEach(([id, k]) => body.querySelector("#" + id).addEventListener("change", (e) => {
       const x = parseClock(e.target.value);
-      if (x != null) { if (k === "a") sl.set(len, Math.min(x, sl.st.b - 1), sl.st.b); else sl.set(len, sl.st.a, Math.max(x, sl.st.a + 1)); }
+      if (x != null) {
+        const span = sl.st.b - sl.st.a;
+        if (k === "a") { const na = Math.min(Math.max(0, x), len - 1); sl.set(len, na, na < sl.st.b ? sl.st.b : Math.min(len, na + span)); }
+        else { const nb = Math.min(Math.max(1, x), len); sl.set(len, nb > sl.st.a ? sl.st.a : Math.max(0, nb - span), nb); }
+      }
       e.target.blur(); paint();
     }));
     paint();
