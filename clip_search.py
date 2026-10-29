@@ -44,15 +44,15 @@ def L(ru, en):
     return en if LANG["code"] == "en" else ru
 
 
-RELEASE_NOTES = """- Клипы из эфира: приложение держит в памяти последние минуты трансляции вместе со звуком — сохраняйте момент одной кнопкой.
-- Записи трансляций: скачивайте их целиком или вырезайте нужный кусок, в том числе у эфира, который ещё идёт.
+RELEASE_NOTES = """- Записи трансляций: скачивайте их целиком или вырезайте нужный кусок, в том числе у эфира, который ещё идёт.
+- Чат трансляции на видео: включите галочку — и к записи или клипу добавится чат, каким он был в тот момент. Можно поверх видео или отдельным файлом с прозрачным фоном.
 - ClipSearch теперь есть для macOS: Apple Silicon (M1 и новее) и Intel, macOS 11 и новее.
 - Установщик для Windows ставит именно ту версию, которую вы скачали.
 
 <!-- en -->
 ### English
-- Live clips: the app keeps the last minutes of a broadcast in memory with the sound — save the moment with one button.
 - Broadcast videos: download them whole or cut out the part you need, even from a stream that is still live.
+- Stream chat on videos: turn on the switch and the chat is added to a video or clip as it was at that moment — on top of the video or as a separate file with a transparent background.
 - ClipSearch is now available for macOS: Apple Silicon (M1 and newer) and Intel, macOS 11 or later.
 - The Windows installer now installs exactly the version you downloaded."""
 GITHUB_API = os.environ.get("CLIPS_GITHUB_API", "https://api.github.com")
@@ -580,8 +580,6 @@ TOKEN_QUERY = """query PlaybackAccessToken($login: String!, $isLive: Boolean!, $
   streamPlaybackAccessToken(channelName: $login, params: {platform: "web", playerBackend: "mediaplayer", playerType: $playerType}) @include(if: $isLive) { value signature }
   videoPlaybackAccessToken(id: $vodID, params: {platform: "web", playerBackend: "mediaplayer", playerType: $playerType}) @include(if: $isVod) { value signature }
 }"""
-LIVE_KEEP = (2, 5, 10, 15)
-LIVE_QUALITIES = ("1080", "720", "480")
 VOD_QUALITIES = ("1080", "720", "480", "360", "audio")
 PRECISE_LIMIT = 20 * 60
 
@@ -846,7 +844,7 @@ def video_json(v):
     th = "" if ("_404/" in th or "processing" in th or not th) else th.replace("%{width}", "320").replace("%{height}", "180")
     return {"id": str(v.get("id", "")), "title": v.get("title") or "", "login": v.get("user_login") or "", "name": v.get("user_name") or "",
             "created": v.get("created_at") or "", "duration": helix_duration(v.get("duration")), "thumb": th,
-            "views": int(v.get("view_count") or 0), "url": v.get("url") or "", "streamId": str(v.get("stream_id") or ""),
+            "views": int(v.get("view_count") or 0), "url": v.get("url") or "", "streamId": str(v.get("stream_id") or ""), "userId": str(v.get("user_id") or ""),
             "muted": [[int(m.get("offset") or 0), int(m.get("duration") or 0)] for m in (v.get("muted_segments") or [])]}
 
 
@@ -884,6 +882,468 @@ def quality_list(vs):
     return out
 
 
+CHAT_FPS = 20
+CHAT_MODES = ("right", "left", "file")
+BTTV_API = os.environ.get("CLIPS_BTTV_API", "https://api.betterttv.net/3")
+FFZ_API = os.environ.get("CLIPS_FFZ_API", "https://api.frankerfacez.com/v1")
+STV_API = os.environ.get("CLIPS_7TV_API", "https://7tv.io/v3")
+EMOJI_CDN = os.environ.get("CLIPS_EMOJI_CDN", "https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72")
+TWITCH_EMOTE = os.environ.get("CLIPS_TWITCH_EMOTE", "https://static-cdn.jtvnw.net/emoticons/v2/{id}/default/dark/2.0")
+COMMENTS_QUERY = """query ($id: ID!, $off: Int, $cur: Cursor) { video(id: $id) { comments(contentOffsetSeconds: $off, after: $cur) {
+  edges { cursor node { id contentOffsetSeconds commenter { login displayName }
+  message { userColor fragments { text emote { emoteID } } userBadges { setID version } } } } pageInfo { hasNextPage } } } }"""
+NAME_COLORS = ["#ff4d4d", "#4d7bff", "#3ddc97", "#b0ff4d", "#ff7f50", "#9acd32", "#ff6aa2", "#2e8b57", "#daa520", "#d2691e", "#5f9ea0", "#1e90ff", "#ff69b4", "#8a2be2", "#00e5c0"]
+EMOJI_RE = re.compile("(?:[\U0001F1E6-\U0001F1FF]{2})|(?:[\U0001F300-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF\u2300-\u23FF\u2190-\u21FF\u3030\u303D\u3297\u3299\u00A9\u00AE]"
+                      "\uFE0F?(?:[\U0001F3FB-\U0001F3FF])?(?:\u200D[\U0001F300-\U0001FAFF\u2600-\u27BF\u2640\u2642\u2695]\uFE0F?(?:[\U0001F3FB-\U0001F3FF])?)*)")
+CJK_RE = re.compile("[\u1100-\u11FF\u2E80-\u9FFF\uAC00-\uD7AF\uF900-\uFAFF\uFF00-\uFFEF]")
+
+
+def gql_post(body, timeout=20):
+    req = urllib.request.Request(GQL_URL, data=json.dumps(body).encode(), headers={"Client-Id": GQL_CLIENT_ID, "Content-Type": "application/json", "User-Agent": WEB_UA})
+    last = None
+    for a in range(4):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.load(r)
+        except urllib.error.HTTPError as e:
+            last = e
+            if e.code not in (429, 500, 502, 503, 504):
+                break
+        except Exception as e:
+            last = e
+        time.sleep(1 + a * 2)
+    raise TwitchError(L(f"Twitch не отдал чат: {getattr(last, 'reason', last)}", f"Twitch did not return the chat: {getattr(last, 'reason', last)}"))
+
+
+def fetch_chat(vod_id, start, end, cancel=None, progress=None):
+    out, seen, cur, off = [], set(), None, int(max(0, start))
+    for _ in range(20000):
+        if cancel is not None and cancel.is_set():
+            raise Cancelled()
+        variables = {"id": str(vod_id)}
+        if cur:
+            variables["cur"] = cur
+        else:
+            variables["off"] = off
+        d = gql_post({"query": COMMENTS_QUERY, "variables": variables})
+        video = (d.get("data") or {}).get("video")
+        if not video:
+            raise TwitchError(L("Чат этой записи недоступен.", "This video's chat is unavailable."))
+        c = video.get("comments") or {}
+        edges = c.get("edges") or []
+        last_t = None
+        for e in edges:
+            n = e.get("node") or {}
+            t = float(n.get("contentOffsetSeconds") or 0)
+            last_t = t
+            if t < start - 0.5 or n.get("id") in seen:
+                continue
+            if t > end:
+                continue
+            seen.add(n.get("id"))
+            m = n.get("message") or {}
+            who = n.get("commenter") or {}
+            out.append({"t": t, "name": who.get("displayName") or who.get("login") or "?", "login": who.get("login") or "",
+                        "color": m.get("userColor") or "", "badges": [(b.get("setID"), b.get("version")) for b in (m.get("userBadges") or []) if b],
+                        "frags": [(f.get("text") or "", ((f.get("emote") or {}).get("emoteID") or None)) for f in (m.get("fragments") or [])]})
+        if progress and last_t is not None and end > start:
+            progress(min(99, int((last_t - start) * 100 / (end - start))))
+        if not edges or not (c.get("pageInfo") or {}).get("hasNextPage") or (last_t is not None and last_t > end):
+            break
+        cur = edges[-1].get("cursor")
+        if not cur:
+            break
+    out.sort(key=lambda m: m["t"])
+    return out
+
+
+def clip_source(slug):
+    d = gql_post({"query": 'query ($s: ID!) { clip(slug: $s) { videoOffsetSeconds durationSeconds video { id } broadcaster { id login } } }', "variables": {"s": slug}})
+    c = (d.get("data") or {}).get("clip") or {}
+    v = c.get("video") or {}
+    return {"video": v.get("id"), "offset": c.get("videoOffsetSeconds"), "duration": c.get("durationSeconds"),
+            "channel": (c.get("broadcaster") or {}).get("id"), "login": (c.get("broadcaster") or {}).get("login")}
+
+
+class ImageCache:
+
+    def __init__(self):
+        self.dir = os.path.join(data_dir(), "cache", "img")
+        os.makedirs(self.dir, exist_ok=True)
+        self.mem = {}
+        self.lock = threading.Lock()
+
+    def raw(self, url):
+        import hashlib
+        p = os.path.join(self.dir, hashlib.sha1(url.encode()).hexdigest())
+        if os.path.isfile(p):
+            with open(p, "rb") as f:
+                return f.read()
+        if os.path.isfile(p + ".miss") and time.time() - os.path.getmtime(p + ".miss") < 86400:
+            return None
+        try:
+            data = web_get(url, timeout=15, tries=2)
+        except Exception:
+            open(p + ".miss", "w").close()
+            return None
+        with open(p, "wb") as f:
+            f.write(data)
+        return data
+
+    def frames(self, url, height):
+        key = (url, height)
+        with self.lock:
+            if key in self.mem:
+                return self.mem[key]
+        from PIL import Image, ImageSequence
+        import io
+        res = None
+        data = self.raw(url)
+        if data:
+            try:
+                im = Image.open(io.BytesIO(data))
+                fr, durs = [], []
+                n = getattr(im, "n_frames", 1)
+                for i, f in enumerate(ImageSequence.Iterator(im)):
+                    if i >= 120:
+                        break
+                    g = f.convert("RGBA")
+                    w = max(1, round(g.width * height / max(1, g.height)))
+                    fr.append(g.resize((w, height), Image.LANCZOS))
+                    durs.append(max(20, int(f.info.get("duration") or 100)))
+                if fr:
+                    res = (fr, durs if n > 1 and len(fr) > 1 else None)
+            except Exception as e:
+                log(f"image {url[:80]}: {e!r}")
+        with self.lock:
+            self.mem[key] = res
+        return res
+
+
+def load_json(url):
+    try:
+        return json.loads(web_get(url, timeout=15, tries=2))
+    except Exception:
+        return None
+
+
+def third_party_emotes(channel_id):
+    em = {}
+    g = load_json(f"{BTTV_API}/cached/emotes/global") or []
+    ch = load_json(f"{BTTV_API}/cached/users/twitch/{channel_id}") or {}
+    for e in list(g) + list(ch.get("channelEmotes") or []) + list(ch.get("sharedEmotes") or []):
+        if isinstance(e, dict) and e.get("code") and e.get("id"):
+            em[e["code"]] = f"https://cdn.betterttv.net/emote/{e['id']}/2x"
+    for d in (load_json(f"{FFZ_API}/set/global"), load_json(f"{FFZ_API}/room/id/{channel_id}")):
+        for s in ((d or {}).get("sets") or {}).values():
+            for e in s.get("emoticons") or []:
+                urls = e.get("animated") or e.get("urls") or {}
+                u = urls.get("2") or urls.get("1") or ""
+                if e.get("name") and u:
+                    em[e["name"]] = ("https:" + u) if u.startswith("//") else u
+    for d in (load_json(f"{STV_API}/emote-sets/global"), (load_json(f"{STV_API}/users/twitch/{channel_id}") or {}).get("emote_set")):
+        for e in (d or {}).get("emotes") or []:
+            host = ((e.get("data") or {}).get("host") or {})
+            u = host.get("url") or ""
+            if e.get("name") and u:
+                em[e["name"]] = ("https:" + u if u.startswith("//") else u) + "/2x.webp"
+    return em
+
+
+def chat_badges(channel_id):
+    d = gql_post({"query": 'query ($id: ID!) { badges { setID version imageURL(size: DOUBLE) } user(id: $id) { broadcastBadges { setID version imageURL(size: DOUBLE) } } }',
+                  "variables": {"id": str(channel_id or "0")}})
+    data = d.get("data") or {}
+    out = {(b.get("setID"), b.get("version")): b.get("imageURL") for b in (data.get("badges") or []) if b}
+    for b in ((data.get("user") or {}).get("broadcastBadges") or []):
+        if b:
+            out[(b.get("setID"), b.get("version"))] = b.get("imageURL")
+    return out
+
+
+def find_fonts():
+    win = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts")
+    cands = {
+        "regular": [os.path.join(win, "segoeui.ttf"), "/System/Library/Fonts/Supplemental/Arial.ttf", "/Library/Fonts/Arial.ttf",
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"],
+        "bold": [os.path.join(win, "segoeuib.ttf"), "/System/Library/Fonts/Supplemental/Arial Bold.ttf", "/Library/Fonts/Arial Bold.ttf",
+                 "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"],
+        "cjk": [os.path.join(win, "msyh.ttc"), os.path.join(win, "YuGothM.ttc"), os.path.join(win, "malgun.ttf"),
+                "/System/Library/Fonts/Hiragino Sans GB.ttc", "/System/Library/Fonts/PingFang.ttc", "/System/Library/Fonts/AppleSDGothicNeo.ttc",
+                "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"],
+    }
+    return {k: next((p for p in v if os.path.isfile(p)), None) for k, v in cands.items()}
+
+
+class ChatRenderer:
+
+    def __init__(self, messages, width, height, channel_id, transparent=False, cancel=None):
+        from PIL import ImageFont
+        self.W, self.H, self.transparent, self.cancel = width, height, transparent, cancel
+        self.fs = max(14, round(height / 38))
+        self.pad = round(self.fs * 0.6)
+        self.line = round(self.fs * 1.45)
+        self.ih = round(self.fs * 1.3)
+        fonts = find_fonts()
+        def load(p, size):
+            try:
+                return ImageFont.truetype(p, size) if p else ImageFont.load_default(size)
+            except Exception:
+                return ImageFont.load_default(size)
+        self.f_reg = load(fonts["regular"], self.fs)
+        self.f_bold = load(fonts["bold"] or fonts["regular"], self.fs)
+        self.f_cjk = load(fonts["cjk"], self.fs) if fonts["cjk"] else self.f_reg
+        self.cache = ImageCache()
+        try:
+            self.third = third_party_emotes(channel_id) if channel_id else {}
+        except Exception as e:
+            log(f"third-party emotes: {e!r}")
+            self.third = {}
+        try:
+            self.badges = chat_badges(channel_id)
+        except Exception as e:
+            log(f"badges: {e!r}")
+            self.badges = {}
+        self.msgs = messages
+        self.rows = {}
+
+    def color(self, m):
+        c = m.get("color") or ""
+        if not re.fullmatch(r"#[0-9a-fA-F]{6}", c):
+            import zlib
+            c = NAME_COLORS[zlib.crc32(m["login"].encode()) % len(NAME_COLORS)]
+        r, g, b = int(c[1:3], 16), int(c[3:5], 16), int(c[5:7], 16)
+        if 0.299 * r + 0.587 * g + 0.114 * b < 90:
+            r, g, b = (min(255, int(v * 1.6 + 60)) for v in (r, g, b))
+        return (r, g, b, 255)
+
+    def tokens(self, m):
+        toks = []
+        for key in m["badges"][:3]:
+            u = self.badges.get(key)
+            if u:
+                toks.append(("img", u, False))
+        toks.append(("text", m["name"], "bold", self.color(m)))
+        toks.append(("text", ": ", "reg", (235, 238, 255, 255)))
+        for text, emote in m["frags"]:
+            if emote:
+                toks.append(("img", TWITCH_EMOTE.format(id=emote), True))
+                continue
+            for word in re.split(r"(\s+)", text):
+                if not word:
+                    continue
+                if word.strip() and word in self.third:
+                    toks.append(("img", self.third[word], True))
+                    continue
+                pos = 0
+                for em in EMOJI_RE.finditer(word):
+                    if em.start() > pos:
+                        toks.append(("text", word[pos:em.start()], "reg", (235, 238, 255, 255)))
+                    cps = [f"{ord(ch):x}" for ch in em.group(0) if ch != "\ufe0f"]
+                    toks.append(("img", f"{EMOJI_CDN}/{'-'.join(cps)}.png", True))
+                    pos = em.end()
+                if pos < len(word):
+                    toks.append(("text", word[pos:], "reg", (235, 238, 255, 255)))
+        return toks
+
+    def font_for(self, kind, text):
+        if CJK_RE.search(text):
+            return self.f_cjk
+        return self.f_bold if kind == "bold" else self.f_reg
+
+    def row(self, i):
+        if i in self.rows:
+            return self.rows[i]
+        from PIL import Image, ImageDraw
+        m = self.msgs[i]
+        maxw = self.W - self.pad * 2
+        items, x, y = [], 0, 0
+        for tok in self.tokens(m):
+            if tok[0] == "img":
+                fr = self.cache.frames(tok[1], self.ih if tok[2] else round(self.fs * 1.0))
+                if not fr:
+                    continue
+                w = fr[0][0].width
+                if x + w > maxw and x > 0:
+                    x, y = 0, y + self.line
+                items.append(("img", x, y, fr))
+                x += w + max(2, self.fs // 8)
+            else:
+                text, f = tok[1], self.font_for(tok[2], tok[1])
+                for part in re.split(r"(\s+)", text) if len(text) > 1 else [text]:
+                    if not part:
+                        continue
+                    w = f.getlength(part)
+                    if part.isspace():
+                        if x > 0:
+                            x += w
+                        continue
+                    if x + w > maxw and x > 0:
+                        x, y = 0, y + self.line
+                    while w > maxw and len(part) > 1:
+                        k = len(part)
+                        while k > 1 and f.getlength(part[:k]) > maxw - x:
+                            k -= 1
+                        items.append(("text", x, y, part[:k], f, tok[3]))
+                        part = part[k:]
+                        x, y = 0, y + self.line
+                        w = f.getlength(part)
+                    items.append(("text", x, y, part, f, tok[3]))
+                    x += w
+        h = int(y + self.line)
+        img = Image.new("RGBA", (self.W, h), (0, 0, 0, 0))
+        dr = ImageDraw.Draw(img)
+        anim = []
+        for it in items:
+            if it[0] == "img":
+                _, ix, iy, (frames, durs) = it
+                oy = iy + (self.line - frames[0].height) // 2
+                if durs:
+                    anim.append((int(round(self.pad + ix)), int(oy), frames, durs, sum(durs)))
+                else:
+                    img.alpha_composite(frames[0], (int(round(self.pad + ix)), max(0, int(oy))))
+            else:
+                _, ix, iy, text, f, col = it
+                ty = iy + (self.line - self.fs) // 2 - round(self.fs * 0.12)
+                if self.transparent:
+                    dr.text((self.pad + ix, ty), text, font=f, fill=col, stroke_width=max(2, self.fs // 10), stroke_fill=(0, 0, 0, 230))
+                else:
+                    dr.text((self.pad + ix, ty), text, font=f, fill=col)
+        self.rows[i] = (img, anim)
+        return self.rows[i]
+
+    def frames(self, start, duration):
+        from PIL import Image, ImageDraw
+        import bisect
+        times = [m["t"] for m in self.msgs]
+        n = max(1, int(round(duration * CHAT_FPS)))
+        prev_key, prev = None, None
+        gap = max(2, self.fs // 5)
+        for k in range(n):
+            if self.cancel is not None and self.cancel.is_set():
+                raise Cancelled()
+            t = start + k / CHAT_FPS
+            last = bisect.bisect_right(times, t)
+            vis, used = [], 0
+            for i in range(last - 1, -1, -1):
+                img, anim = self.row(i)
+                if used + img.height + gap > self.H - self.pad * 2:
+                    break
+                vis.append(i)
+                used += img.height + gap
+                if len(vis) > 60:
+                    break
+            ms = int((t - start) * 1000)
+            if k % 200 == 0 and len(self.rows) > 300:
+                for old in [j for j in self.rows if j < last - 150]:
+                    self.rows.pop(old, None)
+            anims = [a for i in vis for a in self.rows[i][1]]
+            key = (tuple(vis), tuple(self.anim_index(a, ms) for a in anims))
+            if key != prev_key:
+                frame = Image.new("RGBA", (self.W, self.H), (0, 0, 0, 0))
+                y = self.H - self.pad
+                if vis and not self.transparent:
+                    top = y - used - gap
+                    bg = Image.new("RGBA", (self.W, self.H), (0, 0, 0, 0))
+                    ImageDraw.Draw(bg).rounded_rectangle((round(self.pad * 0.5), max(0, top), self.W - round(self.pad * 0.5), self.H - round(self.pad * 0.5)),
+                                                         radius=self.fs // 2, fill=(8, 12, 34, 150))
+                    frame.alpha_composite(bg)
+                for i in vis:
+                    img, anim = self.rows[i]
+                    y -= img.height + gap
+                    frame.alpha_composite(img, (0, y + gap))
+                    for ax, ay, frs, durs, total in anim:
+                        frame.alpha_composite(frs[self.anim_index((ax, ay, frs, durs, total), ms)], (ax, max(0, y + gap + ay)))
+                prev, prev_key = frame.tobytes(), key
+            yield prev
+
+    @staticmethod
+    def anim_index(a, ms):
+        durs, total = a[3], a[4]
+        r = ms % total
+        for j, d in enumerate(durs):
+            if r < d:
+                return j
+            r -= d
+        return 0
+
+
+def probe_video(path):
+    ff = find_ffmpeg()
+    r = subprocess.run([ff, "-hide_banner", "-i", path], capture_output=True, creationflags=0x08000000 if os.name == "nt" else 0)
+    text = r.stderr.decode("utf-8", "replace")
+    m = re.search(r"Video:.*?(\d{2,5})x(\d{2,5})", text)
+    d = re.search(r"Duration: (\d+):(\d+):(\d+(?:\.\d+)?)", text)
+    w, h = (int(m.group(1)), int(m.group(2))) if m else (1920, 1080)
+    dur = int(d.group(1)) * 3600 + int(d.group(2)) * 60 + float(d.group(3)) if d else 0.0
+    return w, h, dur
+
+
+def run_ffmpeg_with_frames(cmd, frames, n, cancel=None, progress=None):
+    flags = 0x08000000 if os.name == "nt" else 0
+    pr = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, creationflags=flags)
+    err = []
+    threading.Thread(target=lambda: err.extend(pr.stderr.read().decode("utf-8", "replace").splitlines()[-6:]), daemon=True).start()
+    try:
+        for k, fr in enumerate(frames):
+            if cancel is not None and cancel.is_set():
+                raise Cancelled()
+            try:
+                pr.stdin.write(fr)
+            except (BrokenPipeError, OSError):
+                break
+            if progress and k % CHAT_FPS == 0:
+                progress(min(99, k * 100 // max(1, n)))
+        try:
+            pr.stdin.close()
+        except OSError:
+            pass
+    except BaseException:
+        pr.kill()
+        pr.wait()
+        raise
+    pr.wait()
+    if pr.returncode != 0:
+        log("ffmpeg chat: " + " | ".join(err))
+        raise TwitchError(L("Не удалось наложить чат (ffmpeg). Подробности в log.txt.", "Couldn't add the chat (ffmpeg). See log.txt for details."))
+
+
+def add_chat(video_path, vod_id, channel_id, start, mode, cancel=None, progress=None, name_base=None):
+    w, h, dur = probe_video(video_path)
+    if dur <= 0:
+        raise TwitchError(L("Не удалось прочитать длину видео.", "Couldn't read the video length."))
+    msgs = fetch_chat(vod_id, max(0.0, start - 30), start + dur, cancel, (lambda p: progress(p * 15 // 100)) if progress else None)
+    ff = find_ffmpeg()
+    if mode == "file":
+        cw, ch = max(320, round(h * 0.56)) // 2 * 2, h // 2 * 2
+        rend = ChatRenderer(msgs, cw, ch, channel_id, transparent=True, cancel=cancel)
+        out = os.path.splitext(name_base or video_path)[0] + L(" - чат", " - chat") + ".mov"
+        tmp = out + ".part.mov"
+        cmd = [ff, "-hide_banner", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgba", "-s", f"{cw}x{ch}", "-r", str(CHAT_FPS), "-i", "pipe:0",
+               "-c:v", "prores_ks", "-profile:v", "4444", "-pix_fmt", "yuva444p10le", "-vendor", "apl0", "-qscale:v", "9", tmp]
+        n = int(round(dur * CHAT_FPS))
+        run_ffmpeg_with_frames(cmd, rend.frames(start, dur), n, cancel, (lambda p: progress(15 + p * 85 // 100)) if progress else None)
+        os.replace(tmp, out)
+        return video_path, out, len(msgs)
+    cw, ch = max(300, round(h * 0.5)) // 2 * 2, h // 2 * 2
+    rend = ChatRenderer(msgs, cw, ch, channel_id, transparent=False, cancel=cancel)
+    x = "0" if mode == "left" else "main_w-overlay_w"
+    tmp = video_path + (".chat.mp4" if ".part" in video_path else ".part.chat.mp4")
+    cmd = [ff, "-hide_banner", "-y", "-loglevel", "error", "-i", video_path, "-f", "rawvideo", "-pix_fmt", "rgba", "-s", f"{cw}x{ch}", "-r", str(CHAT_FPS), "-i", "pipe:0",
+           "-filter_complex", f"[0:v][1:v]overlay=x={x}:y=0:eof_action=repeat:format=auto,format=yuv420p[v]", "-map", "[v]", "-map", "0:a?",
+           "-c:v", "libx264", "-preset", "veryfast", "-crf", "19", "-c:a", "copy", "-movflags", "+faststart", tmp]
+    n = int(round(dur * CHAT_FPS))
+    run_ffmpeg_with_frames(cmd, rend.frames(start, dur), n, cancel, (lambda p: progress(15 + p * 85 // 100)) if progress else None)
+    os.replace(tmp, video_path)
+    return video_path, None, len(msgs)
+
+
+def chat_note(count, extra=""):
+    if count == 0:
+        return L("В чате за этот отрезок не было сообщений", "There were no chat messages in this range") + extra
+    return extra.lstrip("; ")
+
+
 def download_vod(src, folder, progress=None, cancel=None):
     quality = src.get("quality") or "1080"
     v, pl = vod_playlist(src["id"], quality)
@@ -910,229 +1370,36 @@ def download_vod(src, folder, progress=None, cancel=None):
     name = f'{safe_name(src.get("login") or "twitch")} - {safe_name(src.get("title") or "VOD")} - v{src["id"]}{tail}{ext}'
     path = os.path.join(folder, name)
     tmp = path + ".part"
+    chat = src.get("chat") if src.get("chat") in CHAT_MODES and not audio else None
+    p1 = (lambda p: progress(p * 45 // 100)) if (progress and chat) else progress
+    muted = sum(1 for _, s in chosen if s["muted"])
+    notes = [L("Twitch заглушил звук в части этого отрезка", "Twitch muted the audio in part of this range")] if muted else []
     try:
-        segments_to_file(fetch_ordered(urls, cancel), tmp, len(urls), offset, (en - st) if precise else None, precise, audio, cancel, progress,
+        segments_to_file(fetch_ordered(urls, cancel), tmp, len(urls), offset, (en - st) if precise else None, precise, audio, cancel, p1,
                          fmp4=bool(pl["init"]))
+        if chat:
+            begin = st if precise else chosen[0][0]
+            try:
+                _, extra, count = add_chat(tmp, src["id"], src.get("userId") or "", begin, chat, cancel,
+                                           (lambda p: progress(45 + p * 55 // 100)) if progress else None, name_base=path)
+                if count == 0:
+                    notes.append(L("в чате за этот отрезок не было сообщений", "no chat messages in this range"))
+                elif extra:
+                    notes.append(L("чат сохранён отдельным файлом", "chat saved as a separate file"))
+            except Cancelled:
+                raise
+            except Exception as e:
+                log(f"chat vod {src['id']}: {e!r}")
+                notes.append(L(f"видео скачано без чата: {e}", f"downloaded without chat: {e}"))
         os.replace(tmp, path)
     except BaseException:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
-        raise
-    muted = sum(1 for _, s in chosen if s["muted"])
-    return path, (L("Twitch заглушил звук в части этого отрезка", "Twitch muted the audio in part of this range") if muted else "")
-
-
-class LiveWatch:
-
-    def __init__(self, ctx, login, user):
-        import tempfile
-        self.ctx, self.login, self.uid = ctx, login, str(user["id"])
-        self.name = user.get("display_name") or login
-        self.avatar = user.get("profile_image_url") or ""
-        self.keep = ctx.live_keep()
-        self.quality = ctx.live_quality()
-        self.dir = os.path.join(tempfile.gettempdir(), "ClipSearch-live", f"{login}-{secrets.token_hex(3)}")
-        os.makedirs(self.dir, exist_ok=True)
-        self.segs = []
-        self.lock = threading.Lock()
-        self.pins = 0
-        self.state, self.error, self.info = "start", "", {}
-        self.media, self.variant, self.last_seq = None, "", -1
-        self.inits = {}
-        self.ad_until = 0.0
-        self.last_info = 0.0
-        self.since = time.time()
-        self.stop = threading.Event()
-        threading.Thread(target=self.run, daemon=True).start()
-
-    def refresh_info(self):
-        self.last_info = time.time()
-        try:
-            tw = self.ctx.twitch()
-            d = tw.get("/streams", {"user_id": self.uid}).get("data") or []
-            if not d:
-                self.info = {}
-                return
-            s = d[0]
-            info = {"title": s.get("title") or "", "game": s.get("game_name") or "", "viewers": int(s.get("viewer_count") or 0),
-                    "startedAt": s.get("started_at") or "", "streamId": str(s.get("id") or ""),
-                    "thumb": str(s.get("thumbnail_url") or "").replace("{width}", "440").replace("{height}", "248") + f"?t={int(time.time() // 60)}"}
-            old = self.info.get("vod") if self.info.get("streamId") == info["streamId"] else None
-            if old is None:
-                for v in tw.get("/videos", {"user_id": self.uid, "type": "archive", "first": 5}).get("data") or []:
-                    if str(v.get("stream_id") or "") == info["streamId"]:
-                        old = {"id": str(v["id"]), "title": v.get("title") or info["title"]}
-                        break
-            info["vod"] = old
-            self.info = info
-        except Exception as e:
-            log(f"live info {self.login}: {e!r}")
-
-    def open_media(self):
-        tok, sig = playback_token(login=self.login)
-        url = f"{USHER_URL}/api/channel/hls/{self.login}.m3u8?" + usher_query(tok, sig)
-        try:
-            text = web_get(url, tries=2).decode("utf-8", "replace")
-        except urllib.error.HTTPError as e:
-            if e.code == 404:
-                return False
-            raise
-        v = pick_variant(parse_master(text, url), self.quality)
-        self.media, self.variant = v["url"], v["name"]
-        return True
-
-    def run(self):
-        fails = 0
-        while not self.stop.is_set():
+        for t in (tmp, tmp + ".chat.mp4"):
             try:
-                if time.time() - self.last_info > 60:
-                    self.refresh_info()
-                if not self.media:
-                    if not self.open_media():
-                        self.state, self.error = "offline", ""
-                        self.stop.wait(20)
-                        continue
-                text = web_get(self.media, timeout=10, tries=2).decode("utf-8", "replace")
-                pl = parse_media(text, self.media)
-                init_path = None
-                if pl["init"]:
-                    init_path = self.inits.get(pl["init"])
-                    if init_path is None:
-                        init_path = os.path.join(self.dir, f"init{len(self.inits)}.mp4")
-                        with open(init_path, "wb") as f:
-                            f.write(web_get(pl["init"], timeout=15, tries=2))
-                        self.inits[pl["init"]] = init_path
-                fresh = False
-                for s in pl["segs"]:
-                    if s["seq"] <= self.last_seq or self.stop.is_set():
-                        continue
-                    self.last_seq = s["seq"]
-                    if s["ad"]:
-                        self.ad_until = time.time() + 6
-                        continue
-                    data = web_get(s["url"], timeout=15, tries=2)
-                    p = os.path.join(self.dir, f"{s['seq']}.ts")
-                    with open(p, "wb") as f:
-                        f.write(data)
-                    with self.lock:
-                        self.segs.append({"seq": s["seq"], "path": p, "dur": s["dur"], "t": time.time(), "size": len(data), "init": init_path})
-                    fresh = True
-                self.state = "ad" if time.time() < self.ad_until else "live"
-                self.error = ""
-                if pl["ended"]:
-                    self.media = None
-                self.prune()
-                fails = 0
-                self.stop.wait(1.0 if fresh else 1.5)
-            except urllib.error.HTTPError as e:
-                fails += 1
-                self.media = None
-                if fails > 2:
-                    self.error = L(f"Twitch ответил {e.code}", f"Twitch responded {e.code}")
-                self.stop.wait(min(20, 2 * fails))
-            except Exception as e:
-                fails += 1
-                self.media = None if fails > 2 else self.media
-                self.error = str(e)
-                if fails in (1, 5, 20):
-                    log(f"live {self.login}: {e!r}")
-                self.stop.wait(min(30, 2 * fails))
-        self.cleanup()
-
-    def prune(self):
-        with self.lock:
-            if self.pins:
-                return
-            total = sum(s["dur"] for s in self.segs)
-            while self.segs and total - self.segs[0]["dur"] >= self.keep * 60:
-                s = self.segs.pop(0)
-                total -= s["dur"]
-                try:
-                    os.remove(s["path"])
-                except OSError:
-                    pass
-
-    def cleanup(self):
-        for _ in range(600):
-            with self.lock:
-                if not self.pins:
-                    break
-            time.sleep(0.1)
-        import shutil
-        shutil.rmtree(self.dir, ignore_errors=True)
-
-    def take(self, back_from, back_to):
-        with self.lock:
-            segs = list(self.segs)
-            self.pins += 1
-        total = sum(s["dur"] for s in segs)
-        out, pos = [], 0.0
-        for s in segs:
-            a, b = pos, pos + s["dur"]
-            pos = b
-            if b > total - back_from + 0.01 and a < total - back_to - 0.01:
-                out.append(s)
-        return out
-
-    def release(self):
-        with self.lock:
-            self.pins = max(0, self.pins - 1)
-
-    def view(self):
-        with self.lock:
-            dur = sum(s["dur"] for s in self.segs)
-            size = sum(s["size"] for s in self.segs)
-            last = self.segs[-1]["t"] if self.segs else 0
-        return {"login": self.login, "name": self.name, "avatar": self.avatar, "state": self.state, "error": self.error,
-                "info": self.info, "buffered": round(dur, 1), "keep": self.keep * 60, "size": size, "quality": self.variant,
-                "age": round(time.time() - last, 1) if last else None, "since": int(self.since)}
-
-
-def save_live_clip(ctx, src, folder, progress=None, cancel=None):
-    w = ctx.live.get(src["login"])
-    if w is None:
-        raise TwitchError(L("Этот канал больше не отслеживается.", "This channel is no longer being watched."))
-    segs = w.take(float(src["from"]), float(src["to"]))
-    try:
-        if not segs:
-            raise TwitchError(L("В памяти пока нет видео за этот отрезок.", "There is no video for this range in memory yet."))
-        init = segs[-1].get("init")
-        segs = [s for s in segs if s.get("init") == init]
-        dur = sum(s["dur"] for s in segs)
-        when = datetime.fromtimestamp(segs[-1]["t"]).strftime("%Y-%m-%d %H-%M-%S")
-        name = f'{safe_name(w.name)} - {L("эфир", "live")} {when} ({int(round(dur))} {L("с", "s")}).mp4'
-        path = os.path.join(folder, name)
-        tmp = path + ".part"
-
-        def chunks():
-            for path in ([init] if init else []) + [s["path"] for s in segs]:
-                with open(path, "rb") as f:
-                    yield f.read()
-        try:
-            segments_to_file(chunks(), tmp, len(segs) + (1 if init else 0), cancel=cancel, progress=progress, fmp4=bool(init))
-            os.replace(tmp, path)
-        except BaseException:
-            try:
-                os.remove(tmp)
+                os.remove(t)
             except OSError:
                 pass
-            raise
-        return path, ""
-    finally:
-        w.release()
-
-
-def clean_live_temp():
-    import tempfile, shutil
-    root = os.path.join(tempfile.gettempdir(), "ClipSearch-live")
-    try:
-        for e in os.scandir(root):
-            if e.is_dir() and time.time() - e.stat().st_mtime > 600:
-                shutil.rmtree(e.path, ignore_errors=True)
-    except OSError:
-        pass
+        raise
+    return path, "; ".join(notes)
 
 
 UI_HTML = r'''<!doctype html>
@@ -1970,42 +2237,10 @@ input, textarea, .errmsg { user-select: text; -webkit-user-select: text; }
 #railDl .dacts button { width: 24px; height: 24px; font-size: 12px; }
 
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
-.nav .count.lvcount { background: #e5384f; }
 .seg.solid .chip.on { color: #fff; background: linear-gradient(180deg, #5a7bff, #3f5ee8); border-color: transparent; box-shadow: 0 0 18px rgba(80, 110, 255, 0.35); }
 .vdtimes .field.tfield { flex: 0 0 160px !important; width: 160px; max-width: 160px; }
-.live-add, .vod-find { display: grid; gap: 14px; margin-bottom: 18px; }
-.live-add .row .btn, .vod-find .row .btn { flex: none; }
-.live-opts { display: flex; flex-wrap: wrap; gap: 10px 26px; }
-.live-add .hint { margin: 0; }
-.live-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; }
-.lv { display: grid; gap: 12px; padding: 16px; position: relative; animation: lvrise .45s var(--ease, ease) both; }
-.lv-top { display: flex; align-items: center; gap: 12px; min-width: 0; }
-.lv-top .av { width: 40px; height: 40px; border-radius: 50%; object-fit: cover; background: #1b2757; flex: none; border: 1px solid var(--line); }
-.lv-who { display: grid; min-width: 0; flex: 1; }
-.lv-who b { font-weight: 500; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.lv-state { font-size: 12.5px; color: var(--muted); display: flex; align-items: center; gap: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.lv-state::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: #626ea3; flex: none; }
-.lv[data-state="live"] .lv-state::before { background: #ff4d63; box-shadow: 0 0 0 0 rgba(255, 77, 99, .6); animation: lvpulse 1.6s infinite; }
-.lv[data-state="ad"] .lv-state::before { background: var(--warn); }
-.lv[data-state="start"] .lv-state::before { background: #8aa0ff; animation: lvpulse 1.6s infinite; }
-@keyframes lvpulse { 0% { box-shadow: 0 0 0 0 rgba(255, 77, 99, .55); } 70% { box-shadow: 0 0 0 8px rgba(255, 77, 99, 0); } 100% { box-shadow: 0 0 0 0 rgba(255, 77, 99, 0); } }
-.lv .xbtn { width: 34px; height: 34px; border-radius: 50%; border: 1px solid var(--line); background: none; color: var(--muted); display: grid; place-items: center; flex: none; }
-.lv .xbtn:hover { color: #fff; border-color: var(--line-strong); }
-.lv-shot { position: relative; aspect-ratio: 16 / 9; border-radius: 14px; overflow: hidden; background: linear-gradient(160deg, #1a2766, #0b1236); border: 1px solid var(--line); }
-.lv-shot img { width: 100%; height: 100%; object-fit: cover; display: block; transition: opacity .4s; }
-.lv-shot .off { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: 13px; text-align: center; padding: 0 20px; }
-.lv-shot .tag { position: absolute; left: 10px; top: 10px; background: #e5384f; color: #fff; font-size: 11px; font-weight: 600; letter-spacing: .06em; padding: 2px 8px; border-radius: 6px; }
-.lv-shot .q { position: absolute; right: 10px; top: 10px; background: rgba(5, 8, 24, .78); font-size: 11.5px; padding: 2px 8px; border-radius: 6px; }
-.lv-title { font-size: 13.5px; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; min-height: 2.7em; }
-.lv-title small { display: block; color: var(--muted); font-size: 12.5px; margin-top: 2px; }
-.lv-buf { display: grid; gap: 6px; }
-.lv-buf .note { display: flex; justify-content: space-between; gap: 10px; font-variant-numeric: tabular-nums; }
-.lv-acts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
-.lv-acts .wide { grid-column: 1 / -1; }
-.lv-acts .btn { padding: 0 10px; }
-.lv .linkbtn { justify-self: start; }
-.clipdlg { width: 600px; }
-.clipdlg h2, .voddlg h2 { margin: 0 0 6px; font-weight: 500; font-size: 20px; }
+.vod-find { display: grid; gap: 14px; margin-bottom: 18px; }
+.voddlg h2 { margin: 0 0 6px; font-weight: 500; font-size: 20px; }
 .trim .scale { display: flex; justify-content: space-between; color: var(--faint); font-size: 12px; margin-top: 6px; font-variant-numeric: tabular-nums; }
 .clipdlg .trim, .voddlg .trim { margin: 14px 0 4px; }
 .modal .foot { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
@@ -2030,6 +2265,10 @@ input, textarea, .errmsg { user-select: text; -webkit-user-select: text; }
 .vdquick .chip { height: 32px; padding: 0 12px; font-size: 12.5px; }
 .vdnotes { display: grid; gap: 6px; color: var(--muted); font-size: 13px; }
 .vdnotes .w { color: var(--warn); }
+.chatopt { display: grid; gap: 8px; justify-items: start; }
+.trim .chatopt { margin-top: 12px; }
+.cmodes { display: flex; flex-wrap: wrap; gap: 6px; }
+.cmodes .chip { height: 30px; padding: 0 12px; font-size: 12.5px; }
 .vod-list { display: grid; gap: 12px; }
 .vd { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 16px; padding: 12px; border-radius: var(--radius-md); background: var(--panel); border: 1px solid var(--line); animation: lvrise .4s var(--ease, ease) both; animation-delay: var(--d, 0s); }
 .vd .vth { position: relative; aspect-ratio: 16 / 9; border-radius: 12px; overflow: hidden; background: linear-gradient(160deg, #1a2766, #0b1236); }
@@ -2043,7 +2282,7 @@ input, textarea, .errmsg { user-select: text; -webkit-user-select: text; }
 .vd-user { display: flex; align-items: center; gap: 12px; margin: 4px 0 2px; }
 .vd-user img { width: 34px; height: 34px; border-radius: 50%; }
 .vd-user b { font-weight: 500; font-size: 16px; }
-@media (max-width: 900px) { .vd { grid-template-columns: 1fr; } .live-grid { grid-template-columns: 1fr; } }
+@media (max-width: 900px) { .vd { grid-template-columns: 1fr; } }
 @keyframes lvrise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
 body.glass-os .vd { background: linear-gradient(150deg, rgba(60, 82, 180, 0.16), rgba(12, 18, 56, 0.26)); }
 </style>
@@ -2074,7 +2313,6 @@ body.glass-os .vd { background: linear-gradient(150deg, rgba(60, 82, 180, 0.16),
     <div class="brand"><img src="/icon.png" alt=""><b>Clip<span>Search</span></b></div>
     <nav class="nav" aria-label="Разделы" id="mainNav"><span class="navind" id="navInd"></span>
       <button class="on" data-view="search"><span class="ic"><svg class="i" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg></span><span>Поиск</span></button>
-      <button data-view="live"><span class="ic"><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.2"/><path d="M8.1 8.1a5.5 5.5 0 0 0 0 7.8M15.9 8.1a5.5 5.5 0 0 1 0 7.8M5.3 5.3a9.5 9.5 0 0 0 0 13.4M18.7 5.3a9.5 9.5 0 0 1 0 13.4"/></svg></span><span>Эфир</span><span class="count lvcount" id="liveCount" hidden>0</span></button>
       <button data-view="vods"><span class="ic"><svg class="i" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="m10.2 9.2 4.6 2.8-4.6 2.8z"/></svg></span><span>Записи</span></button>
       <button data-view="downloads"><span class="ic"><svg class="i" viewBox="0 0 24 24"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14"/></svg></span><span>Загрузки</span><span class="count" id="dlCount" hidden>0</span></button>
     </nav>
@@ -2174,6 +2412,7 @@ body.glass-os .vd { background: linear-gradient(150deg, rgba(60, 82, 180, 0.16),
               <div class="sel-sub" id="selSub">Нажмите на карточки, чтобы выбрать</div>
               <div class="stack">
                 <button class="btn qbtn" data-qbtn type="button" title="Качество скачивания"><svg class="i" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="M7 15V9l2.5 3L12 9v6M15 9h2a2 2 0 0 1 0 6h-2z"/></svg><span class="qtext">Качество: 1080p</span><svg class="i chev" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button>
+                <div class="chatopt" data-chatopt><button class="switch" type="button" role="switch" aria-checked="false" data-chaton title="Добавить к видео чат трансляции — каким он был в этот момент. Чат берётся из записи эфира."><span class="tr"></span>Чат трансляции</button><div class="cmodes" data-cmodes hidden><button class="chip" type="button" data-cm="right">Справа</button><button class="chip" type="button" data-cm="left">Слева</button><button class="chip" type="button" data-cm="file">Отдельным файлом</button></div></div>
                 <button class="btn" id="bDl" disabled><svg class="i" viewBox="0 0 24 24"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14"/></svg>Скачать в 1080p</button>
                 <button class="btn" id="bCopy" disabled><svg class="i" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="3"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg>Скопировать ссылки</button>
                 <button class="btn" id="bAll"><svg class="i" viewBox="0 0 24 24"><path d="m5 12 5 5 9-10"/></svg>Выбрать все найденные</button>
@@ -2193,24 +2432,6 @@ body.glass-os .vd { background: linear-gradient(150deg, rgba(60, 82, 180, 0.16),
             </div>
           </aside>
         </div>
-      </div>
-
-      <div class="view" id="v-live">
-        <h1>Клипы из <b>эфира</b></h1>
-        <p class="lede">Добавьте стримера — приложение будет держать в памяти последние минуты трансляции вместе со звуком, даже если там играет музыка. Случился момент — нажмите «Клип».</p>
-        <div class="card live-add">
-          <div class="row">
-            <label class="field" id="fLive" for="liveLogin"><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/></svg><input id="liveLogin" placeholder="Ник стримера или ссылка на канал" autocomplete="off" spellcheck="false"></label>
-            <button class="btn primary" id="liveAdd" type="button"><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.2"/><path d="M8.1 8.1a5.5 5.5 0 0 0 0 7.8M15.9 8.1a5.5 5.5 0 0 1 0 7.8"/></svg>Следить за эфиром</button>
-          </div>
-          <div class="live-opts">
-            <div class="seg solid" id="liveKeep"><span class="lbl">Держать в памяти</span><button class="chip" type="button" data-k="2">2 мин</button><button class="chip" type="button" data-k="5">5 мин</button><button class="chip" type="button" data-k="10">10 мин</button><button class="chip" type="button" data-k="15">15 мин</button></div>
-            <div class="seg solid" id="liveQ"><span class="lbl">Качество</span><button class="chip" type="button" data-q="1080">1080p</button><button class="chip" type="button" data-q="720">720p</button><button class="chip" type="button" data-q="480">480p</button></div>
-          </div>
-          <p class="hint">Пока канал в списке, приложение смотрит эфир в фоне: трафик как при обычном просмотре, около 3 ГБ в час в 1080p. Рекламные вставки Twitch в клипы не попадают.</p>
-        </div>
-        <div class="live-grid" id="liveList"></div>
-        <div class="empty" id="liveEmpty"><div class="big"><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.2"/><path d="M8.1 8.1a5.5 5.5 0 0 0 0 7.8M15.9 8.1a5.5 5.5 0 0 1 0 7.8M5.3 5.3a9.5 9.5 0 0 0 0 13.4M18.7 5.3a9.5 9.5 0 0 1 0 13.4"/></svg></div><h3>Здесь появятся эфиры</h3><p>Впишите стримера и нажмите «Следить за эфиром». Можно следить за четырьмя каналами сразу.</p></div>
       </div>
 
       <div class="view" id="v-vods">
@@ -2277,6 +2498,7 @@ body.glass-os .vd { background: linear-gradient(150deg, rgba(60, 82, 180, 0.16),
         <button class="btn slim" id="bPrev">Посмотреть фрагмент</button>
         <button class="btn slim" id="bTrimReset">Весь клип</button>
       </div>
+      <div class="chatopt" data-chatopt><button class="switch" type="button" role="switch" aria-checked="false" data-chaton title="Добавить к видео чат трансляции — каким он был в этот момент. Чат берётся из записи эфира."><span class="tr"></span>Чат трансляции</button><div class="cmodes" data-cmodes hidden><button class="chip" type="button" data-cm="right">Справа</button><button class="chip" type="button" data-cm="left">Слева</button><button class="chip" type="button" data-cm="file">Отдельным файлом</button></div></div>
     </div>
     <div class="foot">
       <span class="hint" id="pHint">Тяните ползунки или ставьте метки по ходу видео. Пробел — пауза.</span>
@@ -2314,18 +2536,6 @@ body.glass-os .vd { background: linear-gradient(150deg, rgba(60, 82, 180, 0.16),
     <div class="foot"><button class="btn primary" id="khClose">Понятно</button></div>
   </div>
 </div>
-<div class="veil" id="clipVeil">
-  <div class="modal clipdlg" role="dialog" aria-labelledby="cdTitle">
-    <h2 id="cdTitle">Клип из эфира</h2>
-    <p class="note" id="cdSub"></p>
-    <div class="trim">
-      <div class="tl" id="cdTl"><div class="rng"></div><button class="hd" type="button" aria-label="Начало клипа"></button><button class="hd" type="button" aria-label="Конец клипа"></button></div>
-      <div class="scale"><span id="cdMin"></span><span id="cdNow">сейчас</span></div>
-      <div class="tinfo"><span>Начало: <b id="cdA"></b></span><span>Конец: <b id="cdB"></b></span><span>Длина клипа: <b id="cdLen"></b></span></div>
-    </div>
-    <div class="foot"><button class="btn" id="cdCancel" type="button">Отмена</button><button class="btn primary" id="cdGo" type="button"><svg class="i" viewBox="0 0 24 24"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14"/></svg>Сохранить клип</button></div>
-  </div>
-</div>
 <div class="veil" id="vodVeil">
   <div class="modal voddlg" role="dialog" aria-labelledby="vdTitle">
     <div class="ph"><div class="grow"><h2 id="vdTitle"></h2><div class="meta" id="vdMeta"></div></div><button class="xbtn" id="vdClose" type="button" aria-label="Закрыть"><svg class="i" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
@@ -2343,6 +2553,7 @@ body.glass-os .vd { background: linear-gradient(150deg, rgba(60, 82, 180, 0.16),
         </div>
       </div>
       <div class="seg solid" id="vdQ"><span class="lbl">Качество</span></div>
+      <div class="chatopt" data-chatopt><button class="switch" type="button" role="switch" aria-checked="false" data-chaton title="Добавить к видео чат трансляции — каким он был в этот момент. Чат берётся из записи эфира."><span class="tr"></span>Чат трансляции</button><div class="cmodes" data-cmodes hidden><button class="chip" type="button" data-cm="right">Справа</button><button class="chip" type="button" data-cm="left">Слева</button><button class="chip" type="button" data-cm="file">Отдельным файлом</button></div></div>
       <div class="vdnotes" id="vdNotes"></div>
     </div>
     <div class="foot"><button class="btn" id="vdCancel" type="button">Отмена</button><button class="btn primary" id="vdGo" type="button" disabled><svg class="i" viewBox="0 0 24 24"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14"/></svg><span id="vdGoT">Скачать</span></button></div>
@@ -2478,6 +2689,7 @@ const RULES = [
   [/^Не удалось получить ссылку на скачивание клипа (.+)\.$/, "Couldn’t get a download link for clip $1."], [/^Неожиданная ошибка: (.*)$/, "Unexpected error: $1"],
   [/^Слишком много запросов, подождите минуту\.$/, "Too many requests, please wait a minute."],
 ];
+Object.assign(EN, {"Чат трансляции": "Stream chat", "Справа": "Right", "Слева": "Left", "Отдельным файлом": "Separate file", "Добавить к видео чат трансляции — каким он был в этот момент. Чат берётся из записи эфира.": "Add the stream chat to the video — as it was at that moment. The chat comes from the broadcast video."});
 Object.assign(EN, {"Эфир": "Live", "Записи": "Videos", "Клипы из": "Clips from the", "эфира": "stream", "Добавьте стримера — приложение будет держать в памяти последние минуты трансляции вместе со звуком, даже если там играет музыка. Случился момент — нажмите «Клип».": "Add a streamer — the app keeps the last minutes of the broadcast in memory with the sound, even when music is playing. When the moment happens, press “Clip”.", "Ник стримера или ссылка на канал": "Streamer name or channel link", "Следить за эфиром": "Watch the stream", "Держать в памяти": "Keep in memory", "2 мин": "2 min", "5 мин": "5 min", "10 мин": "10 min", "15 мин": "15 min", "Качество": "Quality", "Пока канал в списке, приложение смотрит эфир в фоне: трафик как при обычном просмотре, около 3 ГБ в час в 1080p. Рекламные вставки Twitch в клипы не попадают.": "While a channel is on the list, the app watches the stream in the background: traffic is like normal viewing, about 3 GB per hour in 1080p. Twitch ad breaks don’t end up in clips.", "Здесь появятся эфиры": "Streams will appear here", "Впишите стримера и нажмите «Следить за эфиром». Можно следить за четырьмя каналами сразу.": "Enter a streamer and press “Watch the stream”. You can watch four channels at once.", "трансляций": "of past streams", "Скачайте запись эфира целиком или вырежьте нужный кусок — даже у эфира, который ещё идёт. Видео качается прямо с Twitch.": "Download a whole broadcast or cut out the part you need — even from a stream that is still live. The video downloads straight from Twitch.", "Ник стримера или ссылка на запись (twitch.tv/videos/…)": "Streamer name or video link (twitch.tv/videos/…)", "Найти записи": "Find videos", "Показывать": "Show", "Трансляции": "Broadcasts", "Хайлайты": "Highlights", "Загруженные": "Uploads", "Здесь появятся записи": "Videos will appear here", "Впишите стримера — покажем его последние трансляции. Или вставьте ссылку на конкретную запись.": "Enter a streamer to see their recent broadcasts. Or paste a link to a specific video.", "Клип из эфира": "Live clip", "Начало клипа": "Clip start", "Конец клипа": "Clip end", "сейчас": "now", "Начало:": "Start:", "Конец:": "End:", "Длина клипа:": "Clip length:", "Отмена": "Cancel", "Сохранить клип": "Save clip", "Узнаю длину записи и доступные качества…": "Checking the video length and available qualities…", "Отрезок": "Range", "Целиком": "Whole", "Начало отрезка": "Range start", "Конец отрезка": "Range end", "Скачать": "Download"});
 function tr(s) {
   if (!s || !/[А-Яа-яЁё]/.test(s)) return s;
@@ -3173,7 +3385,7 @@ $("bCsv").addEventListener("click", async () => {
 
 async function startDownload(rows, quality) {
   if (!rows.length) return;
-  const r = await api("/api/download", { quality: quality || S.quality || "1080", items: rows.map((x) => ({ id: x.id, title: x.title, broadcaster: x.broadcaster, start: x.start ?? null, end: x.end ?? null })) });
+  const r = await api("/api/download", { chat: chatParam(), quality: quality || S.quality || "1080", items: rows.map((x) => ({ id: x.id, title: x.title, broadcaster: x.broadcaster, start: x.start ?? null, end: x.end ?? null })) });
   if (r.error) { showAlert(r.error); return; }
   if (r.keys && r.keys.length) S.dlFresh = r.keys[r.keys.length - 1];
   const busy = [...S.downloads.values()].some((x) => x.state === "wait" || x.state === "load");
@@ -3877,117 +4089,6 @@ function rangeSlider(tl, onMove) {
   return { st, set(len, a, b, min) { st.len = Math.max(1, len); st.min = min || 1; st.a = Math.max(0, Math.min(a, st.len)); st.b = Math.max(st.a, Math.min(b, st.len)); paint(); } };
 }
 
-const LV = { items: [], keep: 5, q: "1080", busy: false, cards: new Map() };
-function paintLiveOpts() {
-  document.querySelectorAll("#liveKeep .chip").forEach((c) => c.classList.toggle("on", +c.dataset.k === LV.keep));
-  document.querySelectorAll("#liveQ .chip").forEach((c) => c.classList.toggle("on", c.dataset.q === LV.q));
-}
-function liveStateText(w) {
-  if (w.state === "live") return t2("В эфире", "Live") + (w.info && w.info.viewers ? " · " + w.info.viewers.toLocaleString(LOC) + " " + t2(plural(w.info.viewers, ["зритель", "зрителя", "зрителей"]), w.info.viewers === 1 ? "viewer" : "viewers") : "");
-  if (w.state === "ad") return t2("Реклама Twitch — ждём эфир", "Twitch ad break — waiting for the stream");
-  if (w.state === "offline") return t2("Не в эфире — ждём начала", "Offline — waiting for the stream");
-  return t2("Подключаюсь…", "Connecting…");
-}
-function liveCard(w) {
-  const n = document.createElement("div"); n.className = "card lv"; n.dataset.login = w.login;
-  n.innerHTML = `<div class="lv-top"><img class="av" alt=""><div class="lv-who"><b></b><span class="lv-state"></span></div>
-    <button class="xbtn" type="button" data-a="unwatch" title="${t2("Перестать следить", "Stop watching")}"><svg class="i" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
-    <div class="lv-shot"><img alt="" loading="lazy"><div class="off" hidden></div><span class="tag" hidden>LIVE</span><span class="q" hidden></span></div>
-    <div class="lv-title"></div>
-    <div class="lv-buf"><div class="hatch run"><i style="width:0"></i></div><div class="note"><span class="b1"></span><span class="b2"></span></div></div>
-    <div class="lv-acts"><button class="btn slim primary" type="button" data-a="clip" data-s="30">${t2("Клип 30 с", "Clip 30 s")}</button><button class="btn slim" type="button" data-a="clip" data-s="60">${t2("1 мин", "1 min")}</button><button class="btn slim" type="button" data-a="clip" data-s="120">${t2("2 мин", "2 min")}</button>
-    <button class="btn slim wide" type="button" data-a="pick"><svg class="i" viewBox="0 0 24 24"><circle cx="6" cy="6" r="2.6"/><circle cx="6" cy="18" r="2.6"/><path d="M8.2 7.6 20 18M8.2 16.4 20 6"/></svg>${t2("Выбрать отрезок…", "Choose a range…")}</button></div>
-    <button class="linkbtn" type="button" data-a="vod" hidden>${t2("Запись этого эфира: вырезать любой момент с начала →", "This stream’s video: cut any moment from the start →")}</button>`;
-  n.querySelector(".av").src = w.avatar || "/icon.png";
-  return n;
-}
-function paintLive(items) {
-  LV.items = items; const box = $("liveList");
-  $("liveEmpty").hidden = items.length > 0;
-  const live = items.filter((w) => w.state === "live" || w.state === "ad").length;
-  $("liveCount").hidden = !live; $("liveCount").textContent = live;
-  const keep = new Set(items.map((w) => w.login));
-  for (const [k, n] of LV.cards) if (!keep.has(k)) { n.remove(); LV.cards.delete(k); }
-  items.forEach((w) => {
-    let n = LV.cards.get(w.login);
-    if (!n) { n = liveCard(w); LV.cards.set(w.login, n); box.appendChild(n); }
-    n.dataset.state = w.state;
-    n.querySelector(".lv-who b").textContent = w.name;
-    n.querySelector(".lv-state").textContent = liveStateText(w) + (w.error && w.state !== "live" ? " · " + w.error : "");
-    const info = w.info || {}, img = n.querySelector(".lv-shot img"), off = n.querySelector(".lv-shot .off");
-    const on = w.state === "live" || w.state === "ad";
-    if (info.thumb && on) { if (img.dataset.src !== info.thumb) { img.dataset.src = info.thumb; img.src = info.thumb; } img.hidden = false; off.hidden = true; }
-    else { img.hidden = true; off.hidden = false; off.textContent = w.state === "offline" ? t2("Стример сейчас не в эфире. Как только он начнёт — приложение сразу начнёт запоминать.", "The streamer is offline. As soon as they go live, the app starts remembering.") : t2("Подключаюсь к эфиру…", "Connecting to the stream…"); }
-    n.querySelector(".lv-shot .tag").hidden = !on;
-    const q = n.querySelector(".lv-shot .q"); q.hidden = !w.quality; q.textContent = w.quality || "";
-    const tt = n.querySelector(".lv-title");
-    const html = info.title ? `${esc(info.title)}${info.game ? `<small>${esc(info.game)}</small>` : ""}` : `<small>${esc(t2("Название трансляции появится, когда стример выйдет в эфир.", "The stream title appears once the streamer goes live."))}</small>`;
-    if (tt.dataset.h !== html) { tt.dataset.h = html; tt.innerHTML = html; }
-    const pct = Math.min(100, w.buffered / Math.max(1, w.keep) * 100);
-    n.querySelector(".lv-buf i").style.width = pct + "%";
-    n.querySelector(".lv-buf .hatch").classList.toggle("run", w.state === "live");
-    n.querySelector(".b1").textContent = t2("В памяти ", "In memory ") + clock(w.buffered) + t2(" из ", " of ") + clock(w.keep);
-    n.querySelector(".b2").textContent = w.size ? fmtBytes(w.size) : "";
-    n.querySelectorAll('[data-a="clip"]').forEach((b) => { b.disabled = w.buffered < 3; });
-    n.querySelector('[data-a="pick"]').disabled = w.buffered < 3;
-    const vb = n.querySelector('[data-a="vod"]'); vb.hidden = !(info.vod && info.vod.id); vb.dataset.id = info.vod ? info.vod.id : "";
-  });
-}
-async function liveRefresh() {
-  if (LV.busy) return; LV.busy = true;
-  try { const r = await api("/api/live/list", {}).catch(() => null); if (r && r.items) { LV.keep = r.keep; LV.q = r.quality; paintLiveOpts(); paintLive(r.items); } }
-  finally { LV.busy = false; }
-}
-setInterval(() => { if (LV.items.length || $("v-live").classList.contains("on")) liveRefresh(); }, 1500);
-async function liveAdd() {
-  const v = $("liveLogin").value.trim(); if (!v) { $("liveLogin").focus(); return; }
-  $("liveAdd").disabled = true;
-  const r = await api("/api/live/watch", { login: v }).catch(() => ({ error: t2("Нет связи с программой", "No connection to the app") }));
-  $("liveAdd").disabled = false;
-  if (r.error) { toast(r.error); return; }
-  $("liveLogin").value = ""; paintLive(r.items); toast(t2("Слежу за эфиром", "Watching the stream"));
-}
-$("liveAdd").addEventListener("click", liveAdd);
-$("liveLogin").addEventListener("keydown", (e) => { if (e.key === "Enter") liveAdd(); });
-$("liveKeep").addEventListener("click", async (e) => { const c = e.target.closest(".chip"); if (!c) return; const r = await api("/api/live/settings", { keep: +c.dataset.k }); if (r && !r.error) { LV.keep = r.keep; paintLiveOpts(); } });
-$("liveQ").addEventListener("click", async (e) => { const c = e.target.closest(".chip"); if (!c) return; const r = await api("/api/live/settings", { quality: c.dataset.q }); if (r && !r.error) { LV.q = r.quality; paintLiveOpts(); toast(t2("Новое качество — с ближайших секунд эфира", "New quality applies to the next seconds of the stream")); } });
-async function liveClip(login, from, to) {
-  const r = await api("/api/live/clip", { login, from, to }).catch(() => ({ error: t2("Нет связи с программой", "No connection to the app") }));
-  if (r.error) { toast(r.error); return; }
-  S.dlFresh = r.key; toast(t2("Сохраняю клип…", "Saving the clip…")); pollDownloads();
-}
-$("liveList").addEventListener("click", async (e) => {
-  const b = e.target.closest("[data-a]"); if (!b || b.disabled) return;
-  const card = b.closest(".lv"), login = card.dataset.login, w = LV.items.find((x) => x.login === login); if (!w) return;
-  const a = b.dataset.a;
-  if (a === "unwatch") { const r = await api("/api/live/unwatch", { login }); if (r.items) paintLive(r.items); toast(t2("Больше не слежу за этим эфиром", "Stopped watching this stream")); }
-  if (a === "clip") liveClip(login, Math.min(+b.dataset.s, w.buffered), 0);
-  if (a === "pick") openClipPick(w);
-  if (a === "vod") { document.querySelector('.nav [data-view="vods"]').click(); openVod({ id: b.dataset.id, title: (w.info && w.info.title) || w.name, login: w.login, recording: true }); }
-});
-
-const CP = { w: null, t0: 0, sl: rangeSlider($("cdTl"), () => paintClipPick()) };
-function paintClipPick() {
-  const st = CP.sl.st;
-  $("cdA").textContent = "−" + clock(st.len - st.a); $("cdB").textContent = st.b >= st.len - 0.5 ? t2("сейчас", "now") : "−" + clock(st.len - st.b);
-  $("cdLen").textContent = clock(st.b - st.a);
-}
-function openClipPick(w) {
-  CP.w = w; CP.t0 = Date.now();
-  const len = w.buffered;
-  $("cdTitle").textContent = t2("Клип из эфира: ", "Live clip: ") + w.name;
-  $("cdSub").textContent = t2(`В памяти ${clock(len)}. Выберите отрезок ползунками: правый край — это «сейчас».`, `${clock(len)} in memory. Pick the range with the handles: the right edge is “now”.`);
-  $("cdMin").textContent = "−" + clock(len);
-  CP.sl.set(len, Math.max(0, len - 60), len, 2); paintClipPick(); showVeil($("clipVeil"));
-}
-$("cdCancel").addEventListener("click", () => hideVeil($("clipVeil")));
-$("clipVeil").addEventListener("mousedown", (e) => { if (e.target === $("clipVeil")) hideVeil($("clipVeil")); });
-$("cdGo").addEventListener("click", () => {
-  const st = CP.sl.st, passed = (Date.now() - CP.t0) / 1000;
-  hideVeil($("clipVeil"));
-  liveClip(CP.w.login, st.len - st.a + passed, Math.max(0, st.len - st.b + passed));
-});
-
 const VD = { q: "", login: "", type: "archive", after: "", items: [], cur: null, info: null, mode: "cut", quality: "1080", sl: null };
 function vodRow(v, i) {
   const n = document.createElement("div"); n.className = "vd"; n.style.setProperty("--d", Math.min(i, 10) * 0.04 + "s"); n.dataset.id = v.id;
@@ -4029,6 +4130,22 @@ $("vodList").addEventListener("click", (e) => {
   else openVod(v, b.dataset.a);
 });
 
+S.chat = { on: false, mode: "right" };
+function paintChat() {
+  document.querySelectorAll("[data-chatopt]").forEach((b) => {
+    b.querySelector("[data-chaton]").setAttribute("aria-checked", String(!!S.chat.on));
+    b.querySelector("[data-cmodes]").hidden = !S.chat.on;
+    b.querySelectorAll("[data-cm]").forEach((c) => c.classList.toggle("on", c.dataset.cm === S.chat.mode));
+  });
+  if (VD.info) vdPaint();
+}
+const chatParam = () => (S.chat.on ? S.chat.mode : null);
+document.addEventListener("click", (e) => {
+  const sw = e.target.closest("[data-chaton]"), cm = e.target.closest("[data-cm]");
+  if (sw) S.chat.on = !S.chat.on; else if (cm) S.chat.mode = cm.dataset.cm; else return;
+  paintChat(); api("/api/settings", { chat_on: S.chat.on, chat_mode: S.chat.mode }).catch(() => {});
+  if (sw && S.chat.on) toast(t2("Чат будет добавляться к скачанным видео", "Chat will be added to downloaded videos"));
+});
 function vdPaint() {
   const info = VD.info; if (!info) return;
   const full = VD.mode === "full";
@@ -4043,6 +4160,8 @@ function vdPaint() {
   if (!full && len <= 20 * 60) notes.push(t2("Отрезок обрежется точно до секунды.", "The range is cut to the exact second."));
   else if (!full) notes.push(t2("Длинный отрезок скачается без перекодирования: границы — с точностью до ~10 секунд.", "A long range downloads without re-encoding: edges are accurate to ~10 seconds."));
   if (info.recording) notes.push(t2("Эфир ещё идёт — в записи пока ", "The stream is still live — the video currently has ") + clock(info.length) + ".");
+  if (S.chat.on && VD.quality !== "audio") notes.push(S.chat.mode === "file" ? t2("Чат сохранится отдельным видео с прозрачным фоном (.mov) — его удобно положить поверх в монтажке.", "The chat is saved as a separate video with a transparent background (.mov) — handy to place on top in your editor.")
+    : t2("Чат наложится на видео, поэтому видео перекодируется — это займёт больше времени.", "The chat is drawn onto the video, so it gets re-encoded — this takes longer."));
   const mut = (info.muted || []).filter(([o, d]) => o < b && o + d > a);
   if (mut.length) notes.push(`<span class="w">${esc(t2("В этом отрезке Twitch заглушил звук: ", "Twitch muted the audio in this range: "))}${mut.map(([o, d]) => clock(o) + "–" + clock(o + d)).join(", ")}</span>`);
   $("vdNotes").innerHTML = notes.map((x) => `<div>${x.startsWith("<span") ? x : esc(x)}</div>`).join("");
@@ -4094,7 +4213,7 @@ $("vodVeil").addEventListener("mousedown", (e) => { if (e.target === $("vodVeil"
 $("vdGo").addEventListener("click", async () => {
   const v = VD.cur, info = VD.info; if (!v || !info) return;
   const full = VD.mode === "full", st = VD.sl.st;
-  const body = { id: info.id, title: info.title || v.title, login: info.login || v.login, quality: VD.quality };
+  const body = { id: info.id, title: info.title || v.title, login: info.login || v.login, quality: VD.quality, chat: chatParam(), userId: info.userId || "" };
   if (!full) { body.start = Math.round(st.a * 10) / 10; body.end = Math.round(st.b * 10) / 10; }
   $("vdGo").disabled = true;
   const r = await api("/api/vod/download", body).catch(() => ({ error: t2("Нет связи с программой", "No connection to the app") }));
@@ -4102,11 +4221,9 @@ $("vdGo").addEventListener("click", async () => {
   if (r.error) { toast(r.error); return; }
   vdClose(); S.dlFresh = r.key; toast(full ? t2("Скачиваю запись целиком", "Downloading the whole video") : t2("Скачиваю отрезок записи", "Downloading the range")); pollDownloads();
 });
-liveRefresh();
 addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
-  if (isOpen($("clipVeil"))) { hideVeil($("clipVeil")); e.preventDefault(); e.stopPropagation(); }
-  else if (isOpen($("vodVeil"))) { vdClose(); e.preventDefault(); e.stopPropagation(); }
+  if (isOpen($("vodVeil"))) { vdClose(); e.preventDefault(); e.stopPropagation(); }
 }, true);
 
 (async function init() {
@@ -4115,6 +4232,7 @@ addEventListener("keydown", (e) => {
   requestAnimationFrame(() => requestAnimationFrame(() => document.body.classList.remove("noanim")));
   const st = await api("/api/state");
   S.quality = st.quality || "1080"; paintQuality();
+  if (st.chat) { S.chat = st.chat; paintChat(); }
   S.dir = st.downloadDir; S.history = st.history || {}; S.updateSeen = st.updateSeen || ""; paintDir(); checkLink();
   const l = st.last || {};
   setLogins(l.login || ""); $("words").value = l.words || "";
@@ -4181,6 +4299,25 @@ class Job:
             d["result"] = self.result
         return d
 
+def clip_chat(path, src, mode, cancel, progress):
+    try:
+        cs = clip_source(src["id"])
+    except Exception as e:
+        log(f"clip source {src['id']}: {e!r}")
+        return L("клип скачан без чата: Twitch не ответил", "downloaded without chat: Twitch didn't respond")
+    if not cs.get("video") or cs.get("offset") is None:
+        return L("клип скачан без чата: запись трансляции удалена", "downloaded without chat: the broadcast video was deleted")
+    try:
+        _, extra, count = add_chat(path, cs["video"], cs.get("channel") or "", float(cs["offset"]) + float(src.get("start") or 0), mode, cancel, progress)
+    except Cancelled:
+        raise
+    except Exception as e:
+        log(f"chat clip {src['id']}: {e!r}")
+        return L(f"клип скачан без чата: {e}", f"downloaded without chat: {e}")
+    if count == 0:
+        return L("в чате в этот момент не было сообщений", "there were no chat messages at that moment")
+    return L("чат сохранён отдельным файлом", "chat saved as a separate file") if extra else ""
+
 class DownloadQueue:
 
     def __init__(self, ctx):
@@ -4194,7 +4331,7 @@ class DownloadQueue:
         with self.cv:
             return [{k: v for k, v in it.items() if not k.startswith("_")} for it in self.items]
 
-    def add(self, items, quality):
+    def add(self, items, quality, chat=None):
         keys = []
         with self.cv:
             for i in items:
@@ -4208,7 +4345,8 @@ class DownloadQueue:
                     "key": key, "id": str(i["id"]), "title": str(i.get("title", "")) + tail, "pct": 0, "state": "wait",
                     "path": "", "error": "", "quality": quality,
                     "_src": {"id": str(i["id"]), "title": str(i.get("title", "")), "broadcaster": str(i.get("broadcaster", "")),
-                             "start": float(st) if cut else None, "end": float(en) if cut else None},
+                             "start": float(st) if cut else None, "end": float(en) if cut else None, "chat": chat},
+                    "note": "", "kind": "clip",
                 })
                 keys.append(key)
             if self.thread is None or not self.thread.is_alive():
@@ -4275,11 +4413,13 @@ class DownloadQueue:
                 if kind == "vod":
                     path, note = download_vod(src, folder, progress=prog, cancel=ev)
                     it["note"] = note
-                elif kind == "live":
-                    path, note = save_live_clip(self.ctx, src, folder, progress=prog, cancel=ev)
                 else:
+                    chat = src.get("chat") if src.get("chat") in CHAT_MODES else None
+                    p1 = (lambda p, it=it: it.__setitem__("pct", p * 40 // 100)) if chat else prog
                     path = download_clip({"id": src["id"], "title": src["title"], "broadcaster": src["broadcaster"]}, folder,
-                                         progress=prog, cancel=ev, start=src["start"], end=src["end"], quality=it["quality"])
+                                         progress=p1, cancel=ev, start=src["start"], end=src["end"], quality=it["quality"])
+                    if chat:
+                        it["note"] = clip_chat(path, src, chat, ev, lambda p, it=it: it.__setitem__("pct", 40 + p * 60 // 100))
                 it.update(path=path, pct=100, state="done")
             except Cancelled:
                 it.update(state="stop", pct=0)
@@ -4308,20 +4448,6 @@ class Ctx:
         self.quit = threading.Event()
         self.lock = threading.Lock()
         self.dlq = DownloadQueue(self)
-        self.live = {}
-        clean_live_temp()
-
-    def live_keep(self):
-        v = self.cfg.get("live_keep", 5)
-        return v if v in LIVE_KEEP else 5
-
-    def live_quality(self):
-        v = str(self.cfg.get("live_quality", "1080"))
-        return v if v in LIVE_QUALITIES else "1080"
-
-    def stop_live(self):
-        for w in list(self.live.values()):
-            w.stop.set()
 
     def twitch(self):
         if getattr(self, "_tw", None) is None:
@@ -4492,7 +4618,7 @@ def folder_info(folder):
         with os.scandir(folder) as it:
             for e in it:
                 n = e.name.lower()
-                if e.is_file() and (n.endswith(".mp4") or n.endswith(".m4a")) and ".part" not in n:
+                if e.is_file() and (n.endswith(".mp4") or n.endswith(".m4a") or n.endswith(".mov")) and ".part" not in n:
                     st = e.stat()
                     total += st.st_size
                     files.append((st.st_mtime, e.name, st.st_size, e.path))
@@ -4561,6 +4687,7 @@ def make_handler(ctx):
                     "history": cfg.get("history", {}),
                     "updateSeen": cfg.get("update_seen", ""),
                     "quality": cfg.get("quality", "1080"),
+                    "chat": {"on": bool(cfg.get("chat_on")), "mode": cfg.get("chat_mode") if cfg.get("chat_mode") in CHAT_MODES else "right"},
                     "lang": LANG["code"],
                 })
             if u.path == "/api/job":
@@ -4602,6 +4729,10 @@ def make_handler(ctx):
                     ctx.cfg["quality"] = str(b["quality"])
                 if b.get("lang") in ("ru", "en"):
                     ctx.cfg["lang"] = LANG["code"] = b["lang"]
+                if "chat_on" in b:
+                    ctx.cfg["chat_on"] = bool(b["chat_on"])
+                if b.get("chat_mode") in CHAT_MODES:
+                    ctx.cfg["chat_mode"] = b["chat_mode"]
                 save_config(ctx.cfg)
                 return {"ok": True, "downloadDir": ctx.download_dir()}
             if path == "/api/categories":
@@ -4627,7 +4758,7 @@ def make_handler(ctx):
             if path == "/api/download/clear":
                 ctx.dlq.clear()
                 return {"items": ctx.dlq.view()}
-            if path.startswith("/api/live/") or path.startswith("/api/vod"):
+            if path.startswith("/api/vod"):
                 return self.live_route(path, b)
             if path == "/api/clipurl":
                 cid = str(b.get("id", ""))
@@ -4689,7 +4820,7 @@ def make_handler(ctx):
                 p = os.path.realpath(str(b.get("path", "")))
                 root = os.path.realpath(ctx.download_dir())
                 if (not p.startswith(root + os.sep) or not os.path.isfile(p)
-                        or os.path.splitext(p)[1].lower() not in (".mp4", ".m4a", ".csv")):
+                        or os.path.splitext(p)[1].lower() not in (".mp4", ".m4a", ".mov", ".csv")):
                     raise ValueError("Файл не найден: возможно, его переместили или удалили.")
                 if sys.platform.startswith("win"):
                     os.startfile(p)
@@ -4705,44 +4836,6 @@ def make_handler(ctx):
 
         def live_route(self, path, b):
             tw = ctx.twitch()
-            if path == "/api/live/list":
-                return {"items": [w.view() for w in ctx.live.values()], "keep": ctx.live_keep(), "quality": ctx.live_quality()}
-            if path == "/api/live/watch":
-                login = parse_login(b.get("login"))
-                if not login:
-                    raise ValueError(L("Впишите ник стримера или ссылку на канал.", "Enter a streamer name or a channel link."))
-                if login not in ctx.live:
-                    if len(ctx.live) >= 4:
-                        raise ValueError(L("Можно следить максимум за 4 каналами сразу.", "You can watch up to 4 channels at once."))
-                    ctx.live[login] = LiveWatch(ctx, login, tw.user(login))
-                return {"items": [w.view() for w in ctx.live.values()]}
-            if path == "/api/live/unwatch":
-                w = ctx.live.pop(parse_login(b.get("login")), None)
-                if w:
-                    w.stop.set()
-                return {"items": [w.view() for w in ctx.live.values()]}
-            if path == "/api/live/settings":
-                if b.get("keep") in LIVE_KEEP:
-                    ctx.cfg["live_keep"] = b["keep"]
-                    for w in ctx.live.values():
-                        w.keep = b["keep"]
-                if str(b.get("quality", "")) in LIVE_QUALITIES:
-                    ctx.cfg["live_quality"] = str(b["quality"])
-                    for w in ctx.live.values():
-                        w.quality, w.media = str(b["quality"]), None
-                save_config(ctx.cfg)
-                return {"keep": ctx.live_keep(), "quality": ctx.live_quality()}
-            if path == "/api/live/clip":
-                login = parse_login(b.get("login"))
-                w = ctx.live.get(login)
-                if not w:
-                    raise ValueError(L("Этот канал не отслеживается.", "This channel is not being watched."))
-                a, z = float(b.get("from") or 0), float(b.get("to") or 0)
-                if not (a > z >= 0) or a - z > 16 * 60:
-                    raise ValueError(L("Неверный отрезок.", "Invalid range."))
-                title = L(f"{w.name} — клип эфира, {clock(a - z)}", f"{w.name} — live clip, {clock(a - z)}")
-                key = ctx.dlq.add_task("live", title, {"login": login, "from": a, "to": z, "id": login})
-                return {"key": key}
             if path == "/api/vods":
                 login = parse_login(b.get("login"))
                 if not login:
@@ -4790,8 +4883,10 @@ def make_handler(ctx):
                     raise ValueError(L("Конец отрезка должен быть позже начала.", "The end must be after the start."))
                 title = str(b.get("title") or "VOD")[:120]
                 part = f" ({clock(st or 0)}–{clock(en) if en is not None else L('конец', 'end')})" if (st is not None or en is not None) else ""
-                key = ctx.dlq.add_task("vod", L("Запись: ", "Video: ") + title + part,
-                                       {"id": vid, "title": title, "login": str(b.get("login") or ""), "start": st, "end": en, "quality": q})
+                chat = b.get("chat") if b.get("chat") in CHAT_MODES else None
+                key = ctx.dlq.add_task("vod", L("Запись: ", "Video: ") + title + part + (L(" + чат", " + chat") if chat else ""),
+                                       {"id": vid, "title": title, "login": str(b.get("login") or ""), "start": st, "end": en, "quality": q,
+                                        "chat": chat, "userId": re.sub(r"\D", "", str(b.get("userId") or ""))})
                 return {"key": key}
             raise ValueError("Неизвестная команда.")
 
@@ -4867,7 +4962,8 @@ def make_handler(ctx):
             quality = str(b.get("quality") or ctx.cfg.get("quality") or "1080")
             if quality not in QUALITIES:
                 quality = "1080"
-            return {"keys": ctx.dlq.add(items, quality)}
+            chat = b.get("chat") if b.get("chat") in CHAT_MODES else None
+            return {"keys": ctx.dlq.add(items, quality, chat)}
 
     return Handler
 
@@ -4984,7 +5080,6 @@ def serve(port, token):
             break
         if not ctx.seen_ping and now - started > 180:
             break
-    ctx.stop_live()
     srv.shutdown()
 
 def arg_value(name):
@@ -5022,6 +5117,12 @@ def main():
     if "--write-icon" in sys.argv:
         with open("clip_search.ico", "wb") as f:
             f.write(icon_ico_bytes())
+        return 0
+    if "--selftest-chat" in sys.argv:
+        msgs = [{"t": i * 0.5, "name": f"viewer{i}", "login": f"viewer{i}", "color": "", "badges": [], "frags": [("Привет чат 😂 KEKW", None)]} for i in range(20)]
+        r = ChatRenderer(msgs, 400, 720, "")
+        n = sum(1 for _ in r.frames(5, 2))
+        print("CHAT OK", n, find_fonts())
         return 0
     if "--nettest" in sys.argv:
         r = check_link()

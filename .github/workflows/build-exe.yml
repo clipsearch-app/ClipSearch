@@ -42,10 +42,12 @@ jobs:
           (Get-Content clip_search.py -Raw -Encoding utf8) -replace '(?m)^VERSION = "[^"]*"', "VERSION = `"$env:V`"" | Set-Content clip_search.py -Encoding utf8 -NoNewline
 
       - name: Install PyInstaller
-        run: python -m pip install --quiet pyinstaller
+        run: python -m pip install --quiet pyinstaller pillow
 
       - name: Check the program starts
-        run: python clip_search.py --selftest
+        run: |
+          python clip_search.py --selftest
+          python clip_search.py --selftest-chat
 
       - name: Write the window and installer sources
         id: ver
@@ -183,7 +185,16 @@ jobs:
           sudo installer -pkg py.pkg -target / > /dev/null
           PY=/Library/Frameworks/Python.framework/Versions/3.12/bin/python3
           echo "PY=$PY" >> "$GITHUB_ENV"
-          $PY -m pip install --quiet pyinstaller certifi
+          $PY -m pip install --quiet pyinstaller certifi delocate
+          mkdir -p wh/arm wh/x86 wh/fused
+          $PY -m pip download --quiet --only-binary=:all: --no-deps --python-version 3.12 --platform macosx_11_0_arm64 -d wh/arm pillow
+          $PY -m pip download --quiet --only-binary=:all: --no-deps --python-version 3.12 --platform macosx_10_10_x86_64 --platform macosx_10_13_x86_64 --platform macosx_11_0_x86_64 -d wh/x86 pillow
+          ls wh/arm wh/x86
+          M=$(dirname $PY)/delocate-merge; [ -x "$M" ] || M=$(dirname $PY)/delocate-fuse
+          "$M" wh/arm/*.whl wh/x86/*.whl -w wh/fused
+          ls wh/fused
+          $PY -m pip install --quiet wh/fused/*.whl
+          $PY -c "import PIL, PIL.Image; print('Pillow', PIL.__version__)"
           $PY -c "import platform, sys; print(platform.machine(), sys.version)"
           $PY clip_search.py --selftest
           echo "APP_VERSION=$($PY clip_search.py --version)" >> "$GITHUB_ENV"
@@ -254,6 +265,9 @@ jobs:
         run: |
           B=out/ClipSearch.app/Contents/Resources/backend/clip_backend
           $B --selftest
+          $B --selftest-chat
+          arch -x86_64 $B --selftest-chat && echo "::notice::Intel chat renderer works" || echo "::warning::Intel chat renderer failed"
+          find out/ClipSearch.app/Contents/Resources/backend -name "_imaging*.so" -exec lipo -archs {} \;
           env -i HOME="$HOME" PATH=/usr/bin:/bin "$B" --nettest || { echo "::error::Mac engine cannot reach the ClipSearch server (clean environment)"; exit 1; }
           env -i HOME="$HOME" PATH=/usr/bin:/bin arch -x86_64 "$B" --nettest && echo "::notice::Intel engine reaches the server" || echo "::warning::Intel net check failed"
           arch -x86_64 $B --version && echo "::notice::Intel engine runs (Rosetta)" || echo "::warning::Intel engine not checked"
