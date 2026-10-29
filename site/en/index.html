@@ -17,11 +17,15 @@
 <meta name="twitter:card" content="summary_large_image">
 <meta name="theme-color" content="#070b1f">
 <link rel="icon" href="../logo.svg" type="image/svg+xml">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Onest:wght@300;400;500;600;700&display=swap">
+<link rel="preload" href="/fonts/onest-cyrillic.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/fonts/onest-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preconnect" href="https://api.clip-search.com">
 <style>
+@font-face{font-family:Onest;font-style:normal;font-weight:300 700;font-display:swap;src:url(/fonts/onest-cyrillic-ext.woff2) format('woff2');unicode-range:U+0460-052F,U+1C80-1C8A,U+20B4,U+2DE0-2DFF,U+A640-A69F,U+FE2E-FE2F}
+@font-face{font-family:Onest;font-style:normal;font-weight:300 700;font-display:swap;src:url(/fonts/onest-cyrillic.woff2) format('woff2');unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
+@font-face{font-family:Onest;font-style:normal;font-weight:300 700;font-display:swap;src:url(/fonts/onest-latin-ext.woff2) format('woff2');unicode-range:U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C4,U+2113,U+2C60-2C7F,U+A720-A7FF}
+@font-face{font-family:Onest;font-style:normal;font-weight:300 700;font-display:swap;src:url(/fonts/onest-latin.woff2) format('woff2');unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
+
 :root {
   --sky-0: #070b1f;
   --sky-1: #0c1538;
@@ -339,6 +343,62 @@ footer a { color: var(--muted); }
 .ostabs button { font: inherit; font-size: 15px; font-weight: 600; color: var(--muted); background: none; border: 0; border-radius: 999px; padding: 9px 22px; cursor: pointer; transition: color .2s, background .2s; }
 .ostabs button:hover { color: var(--text); }
 .ostabs button.on { color: #fff; background: linear-gradient(135deg, #7290ff, #5b7cff 55%, #7a63ff); box-shadow: 0 8px 22px rgba(80, 110, 255, .35); }
+
+.modes { display: flex; gap: 6px; width: max-content; max-width: 100%; padding: 5px; border-radius: 999px; border: 1px solid var(--line); background: rgba(8, 12, 40, .5); }
+.modes button { display: inline-flex; align-items: center; gap: 8px; font: inherit; font-size: 15px; font-weight: 600; color: var(--muted); background: none; border: 0; border-radius: 999px; padding: 9px 18px; cursor: pointer; transition: color .2s, background .2s, box-shadow .2s; }
+.modes button .i { stroke: currentColor; }
+.modes button:hover { color: var(--text); }
+.modes button.on { color: #fff; background: linear-gradient(135deg, #7290ff, #5b7cff 55%, #7a63ff); box-shadow: 0 8px 22px rgba(80, 110, 255, .35); }
+.clipf, .vodf { display: grid; gap: 14px; }
+.clipf[hidden], .vodf[hidden], .results[hidden] { display: none; }
+.vrow { grid-template-columns: minmax(0, 1fr); }
+.vodc { grid-template-columns: 220px minmax(0, 1fr) auto; }
+.vodc .thumb .noth { position: absolute; inset: 0; display: grid; place-items: center; background: linear-gradient(160deg, #1a2766, #0b1236); }
+.vodc .thumb .noth .i { width: 34px; height: 34px; stroke: #6f86ff; }
+.livetag { position: absolute; left: 7px; top: 7px; display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 7px; background: #e5384f; font-size: 11.5px; font-weight: 700; letter-spacing: .03em; }
+.livetag svg { width: 8px; height: 8px; }
+.vodc .acts { align-items: center; }
+.vdl { width: min(680px, 100%); }
+.vdl .vtitle { padding-right: 20px; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.vbody { display: grid; gap: 16px; }
+.vload { display: flex; align-items: center; gap: 12px; color: var(--muted); padding: 18px 2px; }
+.spin { width: 22px; height: 22px; flex: none; border-radius: 50%; border: 2.5px solid rgba(150, 172, 255, .25); border-top-color: #8aa0ff; animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.rs { position: relative; height: 34px; margin: 4px 9px 0; touch-action: none; cursor: pointer; }
+.rs-tr { position: absolute; left: -9px; right: -9px; top: 10px; height: 14px; border-radius: 8px; background: rgba(8, 13, 40, .8); border: 1px solid var(--line); }
+.rs-rng { position: absolute; top: 10px; height: 14px; background: linear-gradient(90deg, rgba(111, 140, 255, .55), rgba(122, 99, 255, .55)); border-top: 1px solid #8aa0ff; border-bottom: 1px solid #8aa0ff; }
+.rs-h { position: absolute; top: 3px; width: 18px; height: 28px; margin-left: -9px; border-radius: 8px; border: 0; padding: 0; background: #fff; box-shadow: 0 0 0 4px rgba(91, 124, 255, .35), 0 3px 10px rgba(0, 0, 0, .45); cursor: grab; touch-action: none; }
+.rs-h:focus-visible { outline: 2px solid #b9c4ff; outline-offset: 2px; }
+.rs-scale { display: flex; justify-content: space-between; color: var(--faint); font-size: 12.5px; font-variant-numeric: tabular-nums; margin-top: -6px; }
+.vtimes { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.vtimes .tf { flex: 0 0 150px; height: 44px; padding: 0 14px; }
+.vtimes .tf span { color: var(--muted); font-size: 14px; }
+.vtimes .tf input { font-variant-numeric: tabular-nums; font-size: 15px; }
+.pill.sm { height: 44px; padding: 0 15px; font-size: 14px; }
+.vlocks { display: flex; flex-wrap: wrap; gap: 8px; }
+.vnotes { display: grid; gap: 6px; color: var(--muted); font-size: 14px; }
+.vnotes .w { color: #ffcf8a; }
+.vprog { display: grid; gap: 8px; }
+.vprog[hidden] { display: none; }
+.vbar { height: 12px; border-radius: 8px; background: rgba(8, 13, 40, .9); border: 1px solid var(--line); overflow: hidden; }
+.vbar i { display: block; height: 100%; width: 0; border-radius: 8px; transition: width .4s var(--ease);
+  background: repeating-linear-gradient(135deg, rgba(255, 255, 255, .25) 0 6px, rgba(255, 255, 255, .06) 6px 12px), linear-gradient(90deg, #6f8cff, #7a63ff); background-size: 17px 100%, 100% 100%; animation: stripes .7s linear infinite; }
+@keyframes stripes { to { background-position: 17px 0, 0 0; } }
+.vprog.done .vbar i { background: linear-gradient(90deg, #3ddc97, #2fbf83); animation: none; }
+.vprog.bad .vbar i { background: #5a3a52; animation: none; }
+.vptext { color: var(--muted); font-size: 14px; font-variant-numeric: tabular-nums; }
+.vprog.done .vptext { color: #8ff0c4; }
+.vdl .go:disabled { opacity: .55; }
+.vdl .alert { margin: 0; }
+@media (max-width: 900px) { .vodc { grid-template-columns: 160px minmax(0, 1fr); } .vodc .acts { grid-column: 1 / -1; } }
+@media (max-width: 560px) { .vodc { grid-template-columns: minmax(0, 1fr); } .vodc .acts { grid-column: auto; } .modes { width: 100%; } .modes button { flex: 1; justify-content: center; padding: 9px 10px; font-size: 14px; } .vtimes .tf { flex: 1 1 130px; } }
+@media (prefers-reduced-motion: reduce) { .vbar i, .spin { animation: none; } }
+.veil { display: flex; overflow-y: auto; overscroll-behavior: contain; }
+.veil > .dlg { margin: auto; }
+.vdl .go { white-space: nowrap; }
+.vdl .go svg, .vodc .pbtn svg { width: 18px; height: 18px; flex: none; }
+.vdl .rs-scale { margin-bottom: 4px; }
+.vdl .vlocks .lockbtn { height: 34px; font-size: 13.5px; }
 </style>
 <script type="application/ld+json">
 {"@context":"https://schema.org","@type":"SoftwareApplication","name":"ClipSearch","operatingSystem":"Windows 10, Windows 11, macOS 11","applicationCategory":"MultimediaApplication","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"url":"https://clip-search.com/","downloadUrl":"https://github.com/clipsearch-app/ClipSearch/releases/latest/download/ClipSearchSetup.exe"}
@@ -383,10 +443,15 @@ footer a { color: var(--muted); }
     <div class="hero">
       <span class="eyebrow"><span class="dot"></span>Search right on the site · app for Windows and macOS · free</span>
       <h1>Any Twitch clip <em>in a minute</em></h1>
-      <p class="lede">Enter a streamer, choose a period and find the moment you need. Watch the clip and download it in 1080p. The ClipSearch app does everything else.</p>
+      <p class="lede">Enter a streamer, pick a period and find the moment you need. Download a clip in 1080p or a broadcast video — whole or just the part you need. The ClipSearch app does everything else.</p>
     </div>
 
     <form class="tool glass" id="tool" autocomplete="off" novalidate>
+      <div class="modes" role="tablist" aria-label="What to search">
+        <button type="button" class="on" role="tab" aria-selected="true" data-mode="clips"><svg class="i sm" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="m10 9 5 3-5 3z"/></svg>Clips</button>
+        <button type="button" role="tab" aria-selected="false" data-mode="vods"><svg class="i sm" viewBox="0 0 24 24"><rect x="2.5" y="4.5" width="19" height="13" rx="3"/><path d="M8 21h8M12 17.5V21"/></svg>Broadcast videos</button>
+      </div>
+      <div class="clipf" id="clipf">
       <div class="row r2">
         <label class="field" for="login">
           <svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.6"/><path d="M4.5 20c.7-3.7 3.8-5.8 7.5-5.8s6.8 2.1 7.5 5.8"/></svg>
@@ -427,6 +492,26 @@ footer a { color: var(--muted); }
         <button type="button" class="toggle locked" data-lock="deep"><span class="sw"></span>Deep search<svg class="lk"><use href="#lock"/></svg></button>
         <span class="hint">Up to 500 clips per search on the site. <svg class="lk"><use href="#lock"/></svg> — available in the app</span>
       </div>
+      </div>
+      <div class="vodf" id="vodf" hidden>
+        <div class="row vrow">
+          <label class="field" for="vq">
+            <svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.6"/><path d="M4.5 20c.7-3.7 3.8-5.8 7.5-5.8s6.8 2.1 7.5 5.8"/></svg>
+            <input id="vq" name="vq" placeholder="Streamer or video link (twitch.tv/videos/…)" spellcheck="false" inputmode="text">
+          </label>
+        </div>
+        <div class="row per" role="radiogroup" aria-label="Video type">
+          <span class="lbl">Show</span>
+          <button type="button" class="pill on" data-vt="archive" role="radio" aria-checked="true">Broadcasts</button>
+          <button type="button" class="pill" data-vt="highlight" role="radio" aria-checked="false">Highlights</button>
+          <button type="button" class="pill" data-vt="upload" role="radio" aria-checked="false">Uploads</button>
+        </div>
+        <div class="row act">
+          <button type="button" class="go" id="vgo"><svg class="i" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.2-4.2"/></svg>Find videos</button>
+          <button type="button" class="toggle locked" data-lock="chat"><span class="sw"></span>Stream chat on the video<svg class="lk"><use href="#lock"/></svg></button>
+          <span class="hint">Whole or any range, even while the stream is live. Twitch keeps videos for 7 to 60 days.</span>
+        </div>
+      </div>
       <div class="alert" id="alert" role="alert" hidden></div>
     </form>
 
@@ -457,6 +542,18 @@ footer a { color: var(--muted); }
         </div>
       </div>
       <button type="button" class="more" id="more" hidden>Show more</button>
+    </section>
+
+    <section class="results" id="vresults" aria-live="polite" hidden>
+      <div class="rhead" id="vhead" hidden><div><h2 id="vtitle">Videos</h2><p id="vstatus"></p></div></div>
+      <div class="list" id="vlist">
+        <div class="empty">
+          <svg class="i big" viewBox="0 0 24 24"><rect x="2.5" y="4.5" width="19" height="13" rx="3"/><path d="M8 21h8M12 17.5V21"/></svg>
+          <h3>Videos will appear here</h3>
+          <p>Enter a streamer to see their recent broadcasts. Or paste a link to a specific video.</p>
+        </div>
+      </div>
+      <button type="button" class="more" id="vmore" hidden>Show more</button>
     </section>
 
     <div class="cta center dlpick">
@@ -625,7 +722,7 @@ footer a { color: var(--muted); }
       <h2>Version <b>history</b></h2>
     </div>
     <div class="log glass">
-      <div class="ver"><b>1.1</b><span>October 24, 2026</span><span class="now">Current</span></div>
+      <div class="ver"><b>1.1</b><span>October 29, 2026</span><span class="now">Current</span></div>
       <div><ul><li>Broadcast videos: download them whole or cut out the part you need, even from a stream that is still live.</li><li>Stream chat on broadcast videos: turn on the switch and the chat is added to the downloaded video as it was at that moment. Messages smoothly appear as it plays; size, position and background are adjustable.</li><li>ClipSearch for macOS: Apple Silicon (M1 and newer) and Intel, macOS 11 or later.</li><li>The Windows installer now installs exactly the version you downloaded.</li></ul></div>
       <div class="ver"><b>1.0</b><span>October 24, 2026</span></div>
       <div><ul><li>First public release of ClipSearch.</li><li>Search by streamers, categories, authors and title words over any period, plus the “When clips were made” chart.</li><li>Download in 1080p, 720p or 480p, trim clips in the built-in player, download queue.</li><li>English and Russian interface, Telegram channel button.</li><li>In-app updates.</li></ul></div>
@@ -641,7 +738,7 @@ footer a { color: var(--muted); }
       <details class="glass"><summary>Is it free?</summary><p>Yes. No subscriptions, no ads.</p></details>
       <details class="glass"><summary>Do I need a Twitch account?</summary><p>No. You don’t need to sign in to Twitch or enter keys: the app searches public clips.</p></details>
       <details class="glass"><summary>Where are clips saved?</summary><p>To the folder you choose in “Downloads”. You can open or change it right from the app.</p></details>
-      <details class="glass"><summary>Is there a Mac or phone version?</summary><p>For Mac, yes: macOS 11 or later, Apple Silicon (M1 and newer) and Intel. There’s no phone app, but you can search, watch and download clips one by one right on this site from any device.</p></details>
+      <details class="glass"><summary>Which devices does ClipSearch run on?</summary><p>The app is available for Windows 10 and 11 (64-bit) and for macOS 11 or later — on Macs with Apple Silicon (M1 and newer) and on Intel Macs. There's no app for phones or tablets, but this site works on any device: you can search clips, watch them and download them one by one, and download broadcast videos too.</p></details>
       <details class="glass"><summary>How do I update?</summary><p>No need to download anything again: when a new version comes out, the app offers to update. You can check manually with “Check for updates” in the bottom left.</p></details>
       <details class="glass"><summary>Is it safe?</summary><p>The source code is open on GitHub, and the installer and archive are built there automatically. The app never asks for passwords and doesn’t touch your Twitch account.</p></details>
     </div>
@@ -660,7 +757,7 @@ footer a { color: var(--muted); }
   </div>
 
   <footer>
-    <span>ClipSearch is an independent app, not affiliated with Twitch.</span>
+    <span>ClipSearch is an independent app, not affiliated with Twitch. Users are responsible for how they use downloaded videos — please respect creators’ rights.</span>
     <span><button type="button" class="linkbtn" data-report>Report a problem</button> · <a href="https://t.me/ClipSearch" target="_blank" rel="noopener">Project Telegram channel</a> · <a href="https://github.com/clipsearch-app/ClipSearch/releases">All versions</a> · <a href="https://github.com/clipsearch-app/ClipSearch">Source code</a></span>
   </footer>
 </div>
@@ -742,7 +839,7 @@ footer a { color: var(--muted); }
     const v = document.createElement("div");
     v.className = "veil";
     v.innerHTML = `<div class="dlg ${cls || ""}" role="dialog" aria-modal="true">${html}</div>`;
-    const close = () => { v.querySelector("video")?.pause(); v.remove(); document.removeEventListener("keydown", onKey); };
+    const close = () => { if (v.dataset.busy) return; v.querySelector("video")?.pause(); v.remove(); document.removeEventListener("keydown", onKey); };
     const onKey = (e) => { if (e.key === "Escape") close(); };
     v.addEventListener("click", (e) => { if (e.target === v || e.target.closest("[data-close]")) close(); });
     document.addEventListener("keydown", onKey);
@@ -1004,6 +1101,450 @@ footer a { color: var(--muted); }
   });
   const last = store.get("cs_login");
   if (last) $("login").value = last;
+
+  const T = (ru, en) => (LANG === "en" ? en : ru);
+  const V = { mode: "clips", type: "archive", user: null, items: [], after: "", busy: false, q: "" };
+  const VIC = {
+    live: '<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="5"/></svg>',
+    film: '<svg class="i" viewBox="0 0 24 24"><rect x="2.5" y="4.5" width="19" height="13" rx="3"/><path d="M8 21h8M12 17.5V21"/></svg>',
+  };
+  LOCKS.chat = [T("Чат трансляции на видео", "Stream chat on the video"),
+    T("Приложение добавляет к скачанной записи чат трансляции — каким он был в тот момент: с эмоутами, значками и цветами ников. Можно выбрать размер, положение и фон или сохранить чат отдельным прозрачным видео для монтажа.",
+      "The app adds the stream chat to a downloaded video as it was at that moment: with emotes, badges and name colors. Choose its size, position and background, or save the chat as a separate transparent video for editing.")];
+  LOCKS.precise = [T("Обрезка до секунды", "Cut to the exact second"),
+    T("Приложение режет запись точно по выбранным секундам, а на сайте границы отрезка совпадают с кусками записи Twitch — с точностью примерно до 10 секунд.",
+      "The app cuts the video at exactly the seconds you pick, while on the site the range follows Twitch's video chunks — accurate to about 10 seconds.")];
+
+  const clock = (s) => { s = Math.max(0, Math.round(s)); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60; return h ? `${h}:${String(m).padStart(2, "0")}:${String(x).padStart(2, "0")}` : `${m}:${String(x).padStart(2, "0")}`; };
+  const hms = (s) => { s = Math.round(s); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60; return h ? `${h}h${String(m).padStart(2, "0")}m${String(x).padStart(2, "0")}s` : `${m}m${String(x).padStart(2, "0")}s`; };
+  function parseClock(v) {
+    v = String(v || "").trim().replace(",", ".");
+    if (!v) return null;
+    if (/^\d+(\.\d+)?$/.test(v)) return parseFloat(v);
+    const p = v.split(":"); if (p.length > 3 || p.some((x) => !/^\d+(\.\d+)?$/.test(x))) return null;
+    return p.reduce((a, x) => a * 60 + parseFloat(x), 0);
+  }
+  const parseDur = (s) => { const m = /(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?/.exec(String(s || "")) || []; return (+m[1] || 0) * 3600 + (+m[2] || 0) * 60 + (+m[3] || 0); };
+  function fmtBytes(b) {
+    const u = LANG === "en" ? ["B", "KB", "MB", "GB"] : ["Б", "КБ", "МБ", "ГБ"]; let i = 0;
+    while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; }
+    const t = (i >= 2 ? b.toFixed(b < 10 ? 1 : 0) : String(Math.round(b)));
+    return (LANG === "en" ? t : t.replace(".", ",")) + " " + u[i];
+  }
+  const safeName = (s) => String(s || "").replace(/[\\/:*?"<>|\r\n\t]+/g, " ").replace(/\s+/g, " ").trim().replace(/^\.+|\.+$/g, "").slice(0, 80) || "twitch";
+
+  async function web(path) {
+    let r;
+    try { r = await fetch(`${API}${path}`, { headers: { "X-ClipSearch": "web", "Accept-Language": LANG } }); }
+    catch (_) { throw new Error(T("No connection to the ClipSearch server. Check your internet connection and try again.", "No connection to the ClipSearch server. Check your internet and try again.")); }
+    let d = {};
+    try { d = await r.json(); } catch (_) {}
+    if (!r.ok) { const e = new Error(d.message || T(`The server returned error ${r.status}.`, `The server returned error ${r.status}.`)); e.status = r.status; throw e; }
+    return d;
+  }
+
+  function setMode(m) {
+    V.mode = m; store.set("cs_mode", m);
+    document.querySelectorAll(".modes [data-mode]").forEach((b) => { b.classList.toggle("on", b.dataset.mode === m); b.setAttribute("aria-selected", String(b.dataset.mode === m)); });
+    $("clipf").hidden = m !== "clips"; $("vodf").hidden = m !== "vods";
+    $("results").hidden = m !== "clips"; $("vresults").hidden = m !== "vods";
+    alertMsg("");
+  }
+  document.querySelectorAll(".modes [data-mode]").forEach((b) => b.addEventListener("click", () => { setMode(b.dataset.mode); (b.dataset.mode === "vods" ? $("vq") : $("login")).focus(); }));
+  document.querySelectorAll(".pill[data-vt]").forEach((p) => p.addEventListener("click", () => {
+    V.type = p.dataset.vt;
+    document.querySelectorAll(".pill[data-vt]").forEach((x) => { x.classList.toggle("on", x === p); x.setAttribute("aria-checked", String(x === p)); });
+    if ($("vq").value.trim() && V.user) searchVods(false);
+  }));
+
+  function vodThumb(u) { return u && !/404_processing/.test(u) ? u.replace("%{width}", "440").replace("%{height}", "248") : ""; }
+  function vodRow(v, i) {
+    const th = vodThumb(v.thumbnail_url), live = /404_processing/.test(v.thumbnail_url || ""), ts = new Date(v.created_at), len = parseDur(v.duration);
+    return `<article class="clip vodc" style="--d:${Math.min(i, 12) * 0.03}s" data-vid="${esc(v.id)}">
+      <button type="button" class="thumb" data-va="dl" aria-label="${esc(T("Скачать запись", "Download the video"))}">
+        ${th ? `<img src="${esc(th)}" alt="" loading="lazy">` : `<span class="noth">${VIC.film}</span>`}${live ? `<span class="livetag">${VIC.live}${esc(T("ИДЁТ ЭФИР", "LIVE NOW"))}</span>` : ""}<span class="dur">${clock(len)}</span></button>
+      <div class="info">
+        <h3 title="${esc(v.title || "")}">${esc(v.title || T("Untitled", "Untitled"))}</h3>
+        <div class="meta"><span>${IC.tv}${esc(v.user_name || v.user_login || "")}</span><span>${IC.time}${fmtDate(ts)} <span class="ago">(${ago(ts)})</span></span><span>${IC.eye}${(v.view_count || 0).toLocaleString(LOC)}</span></div>
+      </div>
+      <div class="acts">
+        <button type="button" class="pbtn main" data-va="dl">${IC.dl}${esc(T("Скачать", "Download"))}</button>
+        <a class="ib" href="${esc(v.url || `https://www.twitch.tv/videos/${v.id}`)}" target="_blank" rel="noopener" title="${esc(T("Открыть на Twitch", "Open on Twitch"))}" aria-label="${esc(T("Открыть на Twitch", "Open on Twitch"))}">${IC.tw}</a>
+      </div>
+    </article>`;
+  }
+
+  async function searchVods(more) {
+    if (V.busy) return;
+    alertMsg("");
+    const raw = $("vq").value.trim();
+    if (!raw) { alertMsg(T("Впишите ник стримера или вставьте ссылку на запись.", "Enter a streamer name or paste a video link.")); $("vq").focus(); return; }
+    const link = /twitch\.tv\/(?:[^/]+\/)?videos?\/(\d+)|^v?(\d{6,})$/i.exec(raw);
+    V.busy = true; $("vgo").disabled = true;
+    const list = $("vlist");
+    if (!more) { V.items = []; V.after = ""; $("vhead").hidden = false; $("vtitle").textContent = T("Searching…", "Searching…"); $("vstatus").textContent = T("Connecting to Twitch", "Connecting to Twitch"); $("vmore").hidden = true; list.innerHTML = '<div class="loading">' + '<div class="sk"></div>'.repeat(3) + "</div>"; }
+    try {
+      if (link) {
+        const d = (await api("/videos", [["id", link[1] || link[2]]])).data || [];
+        if (!d.length) throw new Error(T("Запись не найдена: возможно, её удалили. Записи на Twitch хранятся от 7 до 60 дней.", "Video not found: it may have been deleted. Twitch keeps videos for 7 to 60 days."));
+        V.user = null; V.items = d;
+        $("vtitle").textContent = T("Запись трансляции", "Broadcast video"); $("vstatus").textContent = d[0].user_name || "";
+        list.innerHTML = vodRow(d[0], 0); $("vmore").hidden = true;
+        openVod(d[0]);
+        return;
+      }
+      const login = cleanLogin(raw);
+      if (!/^[a-z0-9_]{3,25}$/.test(login)) throw new Error(T(`The name “${login}” looks wrong: only Latin letters, digits and “_”.`, `“${login}” doesn't look like a Twitch name: only Latin letters, digits and “_”.`));
+      store.set("cs_vlogin", login);
+      if (!more || !V.user || V.user.login !== login) {
+        const u = (await api("/users", [["login", login]])).data || [];
+        if (!u.length) throw new Error(T(`Streamer “${login}” was not found on Twitch.`, `Streamer “${login}” wasn't found on Twitch.`));
+        V.user = u[0];
+      }
+      const p = [["user_id", V.user.id], ["type", V.type], ["first", "20"]];
+      if (more && V.after) p.push(["after", V.after]);
+      const d = await api("/videos", p);
+      const items = d.data || [];
+      const start = V.items.length;
+      V.items.push(...items); V.after = (d.pagination || {}).cursor || "";
+      const n = V.items.length;
+      $("vtitle").textContent = n ? `${V.user.display_name}: ${n.toLocaleString(LOC)} ${LANG === "en" ? (n === 1 ? "video" : "videos") : plural(n, ["запись", "записи", "записей"])}` : T("Записей нет", "No videos");
+      $("vstatus").textContent = n ? T("Нажмите «Скачать», чтобы выбрать отрезок и качество.", "Press “Download” to pick a range and quality.") : T("Стример не сохраняет трансляции или удалил их. Записи на Twitch хранятся от 7 до 60 дней.", "The streamer doesn't keep broadcasts or deleted them. Twitch keeps videos for 7 to 60 days.");
+      if (!more) list.innerHTML = "";
+      list.insertAdjacentHTML("beforeend", items.map((v, i) => vodRow(v, start + i)).join(""));
+      if (!n) list.innerHTML = `<div class="empty">${VIC.film.replace('class="i"', 'class="i big"')}<h3>${esc(T("Записей нет", "No videos"))}</h3><p>${esc($("vstatus").textContent)}</p></div>`;
+      $("vmore").hidden = !V.after;
+    } catch (e) {
+      if (!more) { $("vhead").hidden = true; list.innerHTML = ""; }
+      alertMsg(e.message || String(e));
+    } finally { V.busy = false; $("vgo").disabled = false; }
+  }
+  $("vgo").addEventListener("click", () => searchVods(false));
+  $("vq").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); searchVods(false); } });
+  $("vmore").addEventListener("click", () => searchVods(true));
+  $("vlist").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-va]"); if (!b) return;
+    const v = V.items.find((x) => x.id === b.closest(".vodc").dataset.vid);
+    if (v) openVod(v);
+  });
+
+  function rangeSlider(el, onChange) {
+    const st = { len: 1, a: 0, b: 1 };
+    const rng = el.querySelector(".rs-rng"), ha = el.querySelector('[data-h="a"]'), hb = el.querySelector('[data-h="b"]');
+    const paint = () => {
+      const pa = st.a / st.len * 100, pb = st.b / st.len * 100;
+      ha.style.left = pa + "%"; hb.style.left = pb + "%"; rng.style.left = pa + "%"; rng.style.width = Math.max(0, pb - pa) + "%";
+    };
+    const set = (len, a, b) => { st.len = Math.max(1, len); st.a = Math.max(0, Math.min(a, st.len - 1)); st.b = Math.max(st.a + 1, Math.min(b, st.len)); paint(); };
+    const drag = (h) => (e) => {
+      e.preventDefault(); h.setPointerCapture?.(e.pointerId);
+      const r = el.getBoundingClientRect();
+      const move = (ev) => {
+        const v = Math.round(Math.max(0, Math.min(1, (ev.clientX - r.left) / r.width)) * st.len);
+        if (h === ha) st.a = Math.max(0, Math.min(v, st.b - 1)); else st.b = Math.min(st.len, Math.max(v, st.a + 1));
+        paint(); onChange();
+      };
+      move(e);
+      const up = () => { removeEventListener("pointermove", move); removeEventListener("pointerup", up); };
+      addEventListener("pointermove", move); addEventListener("pointerup", up);
+    };
+    ha.addEventListener("pointerdown", drag(ha)); hb.addEventListener("pointerdown", drag(hb));
+    el.addEventListener("pointerdown", (e) => { if (e.target.closest("[data-h]")) return; const r = el.getBoundingClientRect(), v = (e.clientX - r.left) / r.width * st.len; drag(Math.abs(v - st.a) < Math.abs(v - st.b) ? ha : hb)(e); });
+    [ha, hb].forEach((h) => h.addEventListener("keydown", (e) => {
+      const d = e.key === "ArrowLeft" ? -1 : e.key === "ArrowRight" ? 1 : 0; if (!d) return;
+      e.preventDefault(); const k = e.shiftKey ? 60 : 5;
+      if (h === ha) st.a = Math.max(0, Math.min(st.a + d * k, st.b - 1)); else st.b = Math.min(st.len, Math.max(st.b + d * k, st.a + 1));
+      paint(); onChange();
+    }));
+    return { st, set };
+  }
+
+  async function openVod(v) {
+    const live = /404_processing/.test(v.thumbnail_url || "");
+    const dlg = overlay(`<button type="button" class="ib x" data-close aria-label="${esc(T("Закрыть", "Close"))}">${IC.x}</button>
+      <h3 class="vtitle">${esc(v.title || T("Запись трансляции", "Broadcast video"))}</h3>
+      <p class="pmeta">${esc(v.user_name || "")} · ${fmtDate(new Date(v.created_at))}${live ? " · " + esc(T("эфир идёт", "live now")) : ""}</p>
+      <div class="vbody" id="vbody"><div class="vload"><span class="spin"></span>${esc(T("Узнаю длину записи и доступные качества…", "Checking the video length and available qualities…"))}</div></div>`, "vdl");
+    const body = dlg.querySelector("#vbody");
+    let info, list;
+    try {
+      info = await web(`/web/vod?id=${encodeURIComponent(v.id)}`);
+      list = await web(`/web/vodlist?k=${encodeURIComponent(info.qualities[0].k)}`);
+    } catch (e) {
+      body.innerHTML = `<div class="alert">${esc(e.message)}</div><div class="row2"><a class="pbtn" href="${esc(v.url || "")}" target="_blank" rel="noopener">${IC.tw}${esc(T("Открыть на Twitch", "Open on Twitch"))}</a></div>`;
+      return;
+    }
+    if (!dlg.isConnected) return;
+    const lists = { [info.qualities[0].key]: list };
+    const len = list.segs.reduce((a, s) => a + s[1], 0);
+    const quals = info.qualities;
+    const st = { mode: "cut", q: quals.find((q) => !q.audio && q.h <= 1080)?.key || quals[0].key };
+    const quick = !list.ended ? [[60, T("Последняя минута", "Last minute")], [300, T("5 мин", "5 min")], [900, T("15 мин", "15 min")]] : [];
+    body.innerHTML = `
+      <div class="per" id="vmodes"><button type="button" class="pill on" data-m="cut">${esc(T("Отрезок", "Range"))}</button><button type="button" class="pill" data-m="full">${esc(T("Целиком", "Whole"))}</button></div>
+      <div class="vcut" id="vcut">
+        <div class="rs" id="vrs"><div class="rs-tr"></div><div class="rs-rng"></div><button type="button" class="rs-h" data-h="a" aria-label="${esc(T("Начало отрезка", "Range start"))}"></button><button type="button" class="rs-h" data-h="b" aria-label="${esc(T("Конец отрезка", "Range end"))}"></button></div>
+        <div class="rs-scale"><span>0:00</span><span>${clock(len)}</span></div>
+        <div class="vtimes"><label class="field tf"><span>${esc(T("С", "From"))}</span><input id="va" inputmode="numeric" autocomplete="off" spellcheck="false"></label><label class="field tf"><span>${esc(T("по", "to"))}</span><input id="vb" inputmode="numeric" autocomplete="off" spellcheck="false"></label>
+          ${quick.map(([s, l]) => `<button type="button" class="pill sm" data-last="${s}">${esc(l)}</button>`).join("")}</div>
+      </div>
+      <div class="per" id="vqs"><span class="lbl">${esc(T("Качество", "Quality"))}</span>${quals.filter((q) => q.audio || q.h >= 360).map((q) => `<button type="button" class="pill" data-q="${esc(q.key)}">${esc(q.name)}</button>`).join("")}</div>
+      <div class="vlocks"><button type="button" class="lockbtn" data-lock="chat">${IC.lock}${esc(T("Чат трансляции на видео — в приложении", "Stream chat on the video — in the app"))}</button><button type="button" class="lockbtn" data-lock="precise">${IC.lock}${esc(T("Обрезка до секунды — в приложении", "Cut to the second — in the app"))}</button></div>
+      <div class="vnotes" id="vnotes"></div>
+      <div class="vprog" id="vprog" hidden><div class="vbar"><i id="vbarI"></i></div><div class="vptext" id="vptext"></div></div>
+      <div class="row2" id="vacts"><button type="button" class="go" id="vdo">${IC.dl}<span id="vdoT"></span></button><button type="button" class="ghostbtn" data-close id="vcancel">${esc(T("Отмена", "Cancel"))}</button></div>`;
+    const sl = rangeSlider(body.querySelector("#vrs"), () => paint());
+    sl.set(len, list.ended ? 0 : Math.max(0, len - 120), list.ended ? Math.min(len, 120) : len);
+    const q = () => quals.find((x) => x.key === st.q) || quals[0];
+    function paint() {
+      const full = st.mode === "full", a = full ? 0 : sl.st.a, b = full ? len : sl.st.b, n = b - a;
+      body.querySelectorAll("#vmodes .pill").forEach((p) => p.classList.toggle("on", p.dataset.m === st.mode));
+      body.querySelectorAll("#vqs .pill").forEach((p) => p.classList.toggle("on", p.dataset.q === st.q));
+      body.querySelector("#vcut").hidden = full;
+      const ia = body.querySelector("#va"), ib = body.querySelector("#vb");
+      if (document.activeElement !== ia) ia.value = clock(sl.st.a);
+      if (document.activeElement !== ib) ib.value = clock(sl.st.b);
+      const size = q().bw / 8 * n, notes = [];
+      if (q().bw) notes.push(T("Примерный размер: ", "Estimated size: ") + fmtBytes(size));
+      if (!full) notes.push(T("На сайте границы отрезка — с точностью примерно до 10 секунд.", "On the site the range edges are accurate to about 10 seconds."));
+      if (!list.ended) notes.push(T("Эфир ещё идёт — в записи пока ", "The stream is still live — the video currently has ") + clock(len) + ".");
+      if (n > 3 * 3600) notes.push(`<span class="w">${esc(T("Через сайт за час можно скачать примерно 3 часа записи. Для длинных записей удобнее приложение — в нём ограничений нет.", "The site allows about 3 hours of video per hour. For long videos the app is handier — it has no limits."))}</span>`);
+      body.querySelector("#vnotes").innerHTML = notes.map((x) => `<div>${x.startsWith("<span") ? x : esc(x)}</div>`).join("");
+      body.querySelector("#vdoT").textContent = full ? T("Скачать целиком", "Download whole") + " · " + clock(len) : T("Скачать отрезок ", "Download range ") + clock(n);
+    }
+    body.querySelector("#vmodes").addEventListener("click", (e) => { const p = e.target.closest("[data-m]"); if (p) { st.mode = p.dataset.m; paint(); } });
+    body.querySelector("#vqs").addEventListener("click", (e) => { const p = e.target.closest("[data-q]"); if (p) { st.q = p.dataset.q; paint(); } });
+    body.querySelectorAll("[data-last]").forEach((b) => b.addEventListener("click", () => { sl.set(len, Math.max(0, len - +b.dataset.last), len); paint(); }));
+    [["va", "a"], ["vb", "b"]].forEach(([id, k]) => body.querySelector("#" + id).addEventListener("change", (e) => {
+      const x = parseClock(e.target.value);
+      if (x != null) { if (k === "a") sl.set(len, Math.min(x, sl.st.b - 1), sl.st.b); else sl.set(len, sl.st.a, Math.max(x, sl.st.a + 1)); }
+      e.target.blur(); paint();
+    }));
+    paint();
+    body.querySelector("#vdo").addEventListener("click", async () => {
+      const full = st.mode === "full", a = full ? 0 : sl.st.a, b = full ? len : sl.st.b, qq = q();
+      const btn = body.querySelector("#vdo"); btn.disabled = true;
+      const lockUi = (on) => { dlg.dataset.busy = on ? "1" : ""; body.querySelectorAll("#vmodes .pill, #vqs .pill, .rs-h, #va, #vb, [data-last]").forEach((x) => { x.disabled = on; }); };
+      lockUi(true);
+      const ctl = new AbortController();
+      const cancelBtn = body.querySelector("#vcancel");
+      cancelBtn.removeAttribute("data-close"); cancelBtn.textContent = T("Остановить", "Stop");
+      const stop = () => ctl.abort();
+      cancelBtn.addEventListener("click", stop);
+      const prog = body.querySelector("#vprog"); prog.hidden = false;
+      const bar = body.querySelector("#vbarI"), txt = body.querySelector("#vptext");
+      bar.style.width = "1%"; txt.textContent = T("Готовлюсь…", "Getting ready…");
+      try {
+        let L = lists[qq.key];
+        if (!L) { L = await web(`/web/vodlist?k=${encodeURIComponent(qq.k)}`); lists[qq.key] = L; }
+        const name = `${safeName(v.user_login || v.user_name || "twitch")} - ${safeName(v.title || "VOD")} - v${v.id}${full ? "" : ` (${hms(a)}-${hms(b)})`} [${safeName(qq.name)}]`;
+        await downloadVod({ k: qq.k, list: L, a, b, audio: qq.audio, bw: qq.bw, name, signal: ctl.signal,
+          onProgress: (done, total, bytes, speed) => {
+            bar.style.width = Math.max(1, Math.round(done / total * 100)) + "%";
+            txt.textContent = T(`Скачано ${fmtBytes(bytes)} · ${Math.round(done / total * 100)}%`, `Downloaded ${fmtBytes(bytes)} · ${Math.round(done / total * 100)}%`) + (speed ? ` · ${fmtBytes(speed)}/${T("с", "s")}` : "") + T(" · не закрывайте страницу", " · keep this page open");
+          } });
+        bar.style.width = "100%"; prog.classList.add("done");
+        txt.textContent = T("Готово! Файл сохранён в загрузки браузера.", "Done! The file is in your browser's downloads.");
+        toast(T("Запись скачана", "Video downloaded"));
+      } catch (e) {
+        prog.classList.add("bad");
+        txt.textContent = ctl.signal.aborted ? T("Скачивание остановлено.", "Download stopped.") : (e.message || String(e));
+      } finally {
+        lockUi(false); btn.disabled = false;
+        cancelBtn.removeEventListener("click", stop); cancelBtn.setAttribute("data-close", ""); cancelBtn.textContent = T("Закрыть", "Close");
+      }
+    });
+  }
+
+  class Fmp4Fix {
+    constructor() { this.base = new Map(); }
+    static boxes(u8, from, to, fn) {
+      const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+      let o = from;
+      while (o + 8 <= to) {
+        let size = dv.getUint32(o), hdr = 8;
+        const type = String.fromCharCode(u8[o + 4], u8[o + 5], u8[o + 6], u8[o + 7]);
+        if (size === 1) { size = Number(dv.getBigUint64(o + 8)); hdr = 16; } else if (size === 0) size = to - o;
+        if (size < hdr || o + size > to) break;
+        fn(type, o, size, hdr, dv);
+        o += size;
+      }
+    }
+    rename(u8, o, t) { for (let i = 0; i < 4; i++) u8[o + 4 + i] = t.charCodeAt(i); }
+    init(u8) {
+      Fmp4Fix.boxes(u8, 0, u8.length, (t, o, s, h) => {
+        if (t !== "moov") return;
+        Fmp4Fix.boxes(u8, o + h, o + s, (t2, o2, s2, h2) => {
+          if (t2 === "mvex") Fmp4Fix.boxes(u8, o2 + h2, o2 + s2, (t3, o3) => { if (t3 === "mehd") this.rename(u8, o3, "free"); });
+        });
+      });
+      return u8;
+    }
+    seg(u8) {
+      Fmp4Fix.boxes(u8, 0, u8.length, (t, o, s, h) => {
+        if (t === "sidx" || t === "prft") { this.rename(u8, o, "free"); return; }
+        if (t !== "moof") return;
+        Fmp4Fix.boxes(u8, o + h, o + s, (t2, o2, s2, h2) => {
+          if (t2 !== "traf") return;
+          let track = 0;
+          Fmp4Fix.boxes(u8, o2 + h2, o2 + s2, (t3, o3, s3, h3, dv) => {
+            if (t3 === "tfhd") track = dv.getUint32(o3 + h3 + 4);
+            if (t3 !== "tfdt") return;
+            const ver = u8[o3 + h3], p = o3 + h3 + 4;
+            const val = ver === 1 ? dv.getBigUint64(p) : BigInt(dv.getUint32(p));
+            if (!this.base.has(track)) this.base.set(track, val);
+            let nv = val - this.base.get(track); if (nv < 0n) nv = 0n;
+            if (ver === 1) dv.setBigUint64(p, nv); else dv.setUint32(p, Number(nv));
+          });
+        });
+      });
+      return u8;
+    }
+  }
+
+  const IS_SAFARI = /^((?!chrome|android|crios|fxios).)*safari/i.test(navigator.userAgent || "");
+  const MEM_LIMIT = 1.5 * 1024 ** 3;
+
+  async function swWriter(name, signal) {
+    if (IS_SAFARI || !("serviceWorker" in navigator) || !window.MessageChannel) return null;
+    try {
+      await navigator.serviceWorker.register("/sw.js", { scope: "/" });
+      await navigator.serviceWorker.ready;
+      if (!navigator.serviceWorker.controller) await new Promise((r) => { navigator.serviceWorker.addEventListener("controllerchange", r, { once: true }); setTimeout(r, 4000); });
+      const sw = navigator.serviceWorker.controller;
+      if (!sw) return null;
+      const ch = new MessageChannel(), id = Math.random().toString(36).slice(2) + Date.now().toString(36);
+      const queue = []; let pulls = 0, cancelled = false, waiters = [], readyRes;
+      const ready = new Promise((r) => { readyRes = r; });
+      const flush = () => {
+        while (pulls > 0 && queue.length) {
+          const c = queue.shift(); pulls--;
+          if (c === "end") ch.port1.postMessage("end"); else ch.port1.postMessage(c, [c]);
+        }
+        if (queue.length < 3) { const w = waiters; waiters = []; w.forEach((f) => f()); }
+      };
+      ch.port1.onmessage = (e) => {
+        const d = e.data || {};
+        if (d.ready) readyRes(true);
+        if (d.pull) { pulls++; flush(); }
+        if (d.cancel) { cancelled = true; const w = waiters; waiters = []; w.forEach((f) => f()); }
+      };
+      sw.postMessage({ t: "dl", id, name }, [ch.port2]);
+      const ok = await Promise.race([ready, new Promise((r) => setTimeout(() => r(false), 4000))]);
+      if (!ok) return null;
+      const ka = setInterval(() => { try { sw.postMessage({ t: "ping" }); } catch (_) {} }, 10000);
+      const fr = document.createElement("iframe");
+      fr.hidden = true; fr.src = "/__dl/" + id + "/" + encodeURIComponent(name);
+      document.body.appendChild(fr);
+      return {
+        kind: "sw",
+        async write(u8) {
+          if (cancelled) throw new Error(T("Скачивание отменено в браузере.", "The download was cancelled in the browser."));
+          const buf = u8.byteOffset === 0 && u8.byteLength === u8.buffer.byteLength ? u8.buffer : u8.slice().buffer;
+          queue.push(buf); flush();
+          while (queue.length >= 3 && !cancelled && !signal.aborted) await new Promise((r) => waiters.push(r));
+          if (cancelled) throw new Error(T("Скачивание отменено в браузере.", "The download was cancelled in the browser."));
+        },
+        async close() { queue.push("end"); flush(); while (queue.length && !cancelled) await new Promise((r) => setTimeout(r, 100)); clearInterval(ka); setTimeout(() => fr.remove(), 15000); },
+        abort() { clearInterval(ka); try { ch.port1.postMessage({ err: "aborted" }); } catch (_) {} setTimeout(() => fr.remove(), 1000); },
+      };
+    } catch (_) { return null; }
+  }
+  function memWriter(name) {
+    const parts = [];
+    return {
+      kind: "mem",
+      async write(u8) { parts.push(new Blob([u8])); },
+      async close() {
+        const url = URL.createObjectURL(new Blob(parts, { type: "application/octet-stream" }));
+        const a = document.createElement("a"); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 120e3);
+      },
+      abort() { parts.length = 0; },
+    };
+  }
+
+  async function fetchPart(k, names, signal) {
+    let last;
+    for (let t = 0; t < 4; t++) {
+      if (signal.aborted) throw new Error("aborted");
+      try {
+        const r = await fetch(`${API}/web/vodpart?k=${encodeURIComponent(k)}&s=${names.map(encodeURIComponent).join(",")}`, { signal, headers: { "X-ClipSearch": "web", "Accept-Language": LANG } });
+        if (!r.ok) {
+          let d = {}; try { d = await r.json(); } catch (_) {}
+          const e = new Error(d.message || T(`The server returned error ${r.status}.`, `The server returned error ${r.status}.`));
+          if (r.status === 429 || r.status === 403 || r.status === 400) { e.fatal = true; throw e; }
+          throw e;
+        }
+        return new Uint8Array(await r.arrayBuffer());
+      } catch (e) {
+        if (e.fatal || signal.aborted) throw e;
+        last = e; await new Promise((r) => setTimeout(r, 800 * (t + 1)));
+      }
+    }
+    throw new Error(T("Twitch несколько раз не отдал кусок записи. Попробуйте ещё раз чуть позже.", "Twitch failed to return a part of the video several times. Please try again a bit later.") + (last && last.message ? ` (${last.message})` : ""));
+  }
+
+  async function downloadVod({ k, list, a, b, audio, bw, name, signal, onProgress }) {
+    let t = 0;
+    const pick = [];
+    for (const [n, d] of list.segs) { const s0 = t; t += d; if (t > a + 0.01 && s0 < b - 0.01) pick.push(n); }
+    if (!pick.length) throw new Error(T("В записи нет такого отрезка.", "The video doesn't have this range."));
+    const fmp4 = Boolean(list.init);
+    const file = name + (fmp4 ? (audio ? ".m4a" : ".mp4") : ".ts");
+    const est = bw / 8 * (Math.min(b, t) - a);
+    let w = await swWriter(file, signal);
+    if (!w) {
+      if (est > MEM_LIMIT) throw new Error(T("Этот браузер собирает файл в памяти, поэтому в нём можно скачать до 1,5 ГБ за раз. Выберите отрезок короче или качество ниже, откройте сайт в Chrome, Edge или Firefox на компьютере — или скачайте приложение ClipSearch.",
+        "This browser builds the file in memory, so it can download up to 1.5 GB at a time. Pick a shorter range or lower quality, open the site in Chrome, Edge or Firefox on a computer — or get the ClipSearch app."));
+      w = memWriter(file);
+    }
+    const fix = fmp4 ? new Fmp4Fix() : null;
+    const groups = [];
+    if (fmp4) groups.push({ names: [list.init], init: true });
+    for (let i = 0; i < pick.length; i += 8) groups.push({ names: pick.slice(i, i + 8) });
+    const total = pick.length;
+    let done = 0, bytes = 0, next = 0;
+    const t0 = performance.now();
+    const results = new Map();
+    let writeIdx = 0;
+    const onAbort = () => w.abort();
+    signal.addEventListener("abort", onAbort, { once: true });
+    try {
+      const worker = async () => {
+        while (next < groups.length) {
+          if (signal.aborted) throw new Error("aborted");
+          const idx = next++, g = groups[idx];
+          while (idx - writeIdx > 4 && !signal.aborted) await new Promise((r) => setTimeout(r, 150));
+          const data = await fetchPart(k, g.names, signal);
+          results.set(idx, data);
+          while (results.has(writeIdx)) {
+            const gi = groups[writeIdx], u8 = results.get(writeIdx); results.delete(writeIdx);
+            const out = fix ? (gi.init ? fix.init(u8) : fix.seg(u8)) : u8;
+            await w.write(out);
+            bytes += out.byteLength;
+            if (!gi.init) done += gi.names.length;
+            writeIdx++;
+            const sec = (performance.now() - t0) / 1000;
+            onProgress(done, total, bytes, sec > 2 ? bytes / sec : 0);
+          }
+        }
+      };
+      await Promise.all([worker(), worker(), worker()]);
+      if (signal.aborted) throw new Error("aborted");
+      await w.close();
+    } catch (e) {
+      w.abort();
+      throw e;
+    } finally {
+      signal.removeEventListener("abort", onAbort);
+    }
+  }
+
+  const lastV = store.get("cs_vlogin");
+  if (lastV) $("vq").value = lastV;
+  if (store.get("cs_mode") === "vods" || /#vods\b/.test(location.hash)) setMode("vods");
+
 })();
 </script>
 
