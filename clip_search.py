@@ -1627,6 +1627,7 @@ svg.i { width: 1em; height: 1em; fill: none; stroke: currentColor; stroke-width:
 }
 .nav .count { margin-left: auto; font-size: 12px; background: var(--accent); color: #fff; padding: 1px 8px; border-radius: 10px; }
 .side .spacer { flex: 1; }
+.nav button > span:not(.ic):not(.count) { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .side .foot { font-size: 12px; color: var(--faint); padding: 14px 8px 0; }
 .modal.report { width: 560px; display: grid; gap: 12px; }
 .modal.report h2 { margin: 0; }
@@ -2374,7 +2375,7 @@ input, textarea, .errmsg { user-select: text; -webkit-user-select: text; }
 
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
 .seg.solid .chip.on { color: #fff; background: linear-gradient(180deg, #5a7bff, #3f5ee8); border-color: transparent; box-shadow: 0 0 18px rgba(80, 110, 255, 0.35); }
-.vdtimes .field.tfield { flex: 0 0 160px !important; width: 160px; max-width: 160px; }
+.vdtimes .field.tfield { flex: 0 0 148px !important; width: 148px; max-width: 148px; }
 .vod-find { display: grid; gap: 14px; margin-bottom: 18px; }
 .voddlg h2 { margin: 0 0 6px; font-weight: 500; font-size: 20px; }
 .trim .scale { display: flex; justify-content: space-between; color: var(--faint); font-size: 12px; margin-top: 6px; font-variant-numeric: tabular-nums; }
@@ -2398,7 +2399,9 @@ input, textarea, .errmsg { user-select: text; -webkit-user-select: text; }
 .tfield span { color: var(--muted); font-size: 13px; }
 .tfield input { font-variant-numeric: tabular-nums; }
 .vdquick { display: flex; gap: 6px; flex-wrap: wrap; }
-.vdquick .chip { height: 32px; padding: 0 12px; font-size: 12.5px; }
+.vdquick .chip { height: 40px; padding: 0 14px; font-size: 13px; }
+.vdtimes .tfield { height: 40px; margin-bottom: 0; }
+.vdtimes .tfield input { font-size: 14px; }
 .vdnotes { display: grid; gap: 6px; color: var(--muted); font-size: 13px; }
 .vdnotes .w { color: var(--warn); }
 .chatopt { display: grid; gap: 8px; justify-items: start; }
@@ -2506,7 +2509,7 @@ input[type=range].rg:disabled { opacity: .4; }
     <div class="spacer"></div>
     <div class="side-status"><div class="pill" id="keyPill"><span class="dot"></span><span id="keyText">Проверяю связь…</span></div></div>
     <nav class="nav" aria-label="Программа">
-      <button id="navReport" type="button"><span class="ic"><svg class="i" viewBox="0 0 24 24"><path d="M12 3.5 21.5 20h-19z"/><path d="M12 10v4.5M12 17.2v.1"/></svg></span><span>Сообщить о проблеме</span></button>
+      <button id="navReport" type="button"><span class="ic"><svg class="i" viewBox="0 0 24 24"><path d="M12 3.5 21.5 20h-19z"/><path d="M12 10v4.5M12 17.2v.1"/></svg></span><span>Нашли ошибку?</span></button>
       <button id="navTg" type="button"><span class="ic"><svg class="i" viewBox="0 0 24 24"><path d="M4 12.5 20 5l-3 14-5.5-4.5L9 17l-.5-4.5z"/><path d="m8.5 12.5 8-5.5"/></svg></span><span>Telegram-канал</span></button>
       <button id="navQuit"><span class="ic"><svg class="i" viewBox="0 0 24 24"><path d="M10 4H5v16h5M15 8l4 4-4 4M19 12H9"/></svg></span><span>Выйти</span></button>
     </nav>
@@ -2842,7 +2845,7 @@ const EN = {
   "Не удалось обрезать клип (ffmpeg). Подробности в log.txt.": "Couldn’t trim the clip (ffmpeg). See log.txt for details.",
   "Для обрезки нужен ffmpeg, а он не найден рядом с программой. Пересоберите программу новым build-exe.yml.": "Trimming needs ffmpeg, but it wasn’t found next to the app. Reinstall the app.",
   "без названия": "untitled", "нет такой задачи": "no such task", "Перейти к поиску": "Go to search",
-  "Сообщить о проблеме": "Report a problem", "Опишите, что случилось и что вы делали перед этим. Отчёт придёт разработчику в Telegram.": "Describe what happened and what you were doing before. The report goes to the developer on Telegram.",
+  "Сообщить о проблеме": "Report a problem", "Нашли ошибку?": "Found a bug?", "Опишите, что случилось и что вы делали перед этим. Отчёт придёт разработчику в Telegram.": "Describe what happened and what you were doing before. The report goes to the developer on Telegram.",
   "Например: при скачивании клипа появляется ошибка…": "For example: an error appears when downloading a clip…", "Как с вами связаться (необязательно), например @ник в Telegram": "How to reach you (optional), e.g. your Telegram @name",
   "Приложить журнал ошибок": "Attach the error log", "Что будет отправлено": "What will be sent", "Отмена": "Cancel", "Отправить": "Send", "Спасибо! Отчёт отправлен.": "Thank you! The report has been sent.",
   "Опишите, что случилось.": "Please describe what happened.", "Опишите проблему.": "Please describe the problem.", "Слишком много отчётов. Попробуйте через час.": "Too many reports. Please try again in an hour.",
