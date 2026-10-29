@@ -45,14 +45,14 @@ def L(ru, en):
 
 
 RELEASE_NOTES = """- Записи трансляций: скачивайте их целиком или вырезайте нужный кусок, в том числе у эфира, который ещё идёт.
-- Чат трансляции на видео: включите переключатель — и к записи или клипу добавится чат, каким он был в тот момент. Сообщения плавно появляются по ходу видео. Размер, высоту, угол и фон можно настроить, а в плеере сразу видно, как это будет выглядеть. Можно поверх видео или отдельным файлом с прозрачным фоном.
+- Чат трансляции на записях: включите переключатель — и к скачанной записи добавится чат, каким он был в тот момент. Сообщения плавно появляются по ходу видео. Размер, высоту, положение и фон можно настроить, а в окне настроек сразу видно, как это будет выглядеть. Можно поверх видео или отдельным файлом с прозрачным фоном.
 - ClipSearch теперь есть для macOS: Apple Silicon (M1 и новее) и Intel, macOS 11 и новее.
 - Установщик для Windows ставит именно ту версию, которую вы скачали.
 
 <!-- en -->
 ### English
 - Broadcast videos: download them whole or cut out the part you need, even from a stream that is still live.
-- Stream chat on videos: turn on the switch and the chat is added to a video or clip as it was at that moment, with messages smoothly appearing as the video plays. Size, height, corner and background are adjustable, and the player shows a live preview. On top of the video or as a separate file with a transparent background.
+- Stream chat on broadcast videos: turn on the switch and the chat is added to the downloaded video as it was at that moment, with messages smoothly appearing as it plays. Size, height, position and background are adjustable, with a live preview in the settings. On top of the video or as a separate file with a transparent background.
 - ClipSearch is now available for macOS: Apple Silicon (M1 and newer) and Intel, macOS 11 or later.
 - The Windows installer now installs exactly the version you downloaded."""
 GITHUB_API = os.environ.get("CLIPS_GITHUB_API", "https://api.github.com")
@@ -2366,6 +2366,11 @@ input, textarea, .errmsg { user-select: text; -webkit-user-select: text; }
 .hatch.stopped i { background: repeating-linear-gradient(135deg, rgba(255, 255, 255, 0.25) 0 4px, rgba(255, 255, 255, 0.06) 4px 8px), #5a3a52; }
 .dl.gone { animation: leaveOut .25s ease both; }
 #railDl .dacts button { width: 24px; height: 24px; font-size: 12px; }
+.dl { grid-template-columns: minmax(0, 1fr); min-width: 0; }
+#railDl, #dlAll { min-width: 0; }
+.dl .t .nm { display: block; }
+.vsbar { transition: width 6s cubic-bezier(.15, .7, .3, 1); }
+#vodList .searching { margin-top: 4px; }
 
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
 .seg.solid .chip.on { color: #fff; background: linear-gradient(180deg, #5a7bff, #3f5ee8); border-color: transparent; box-shadow: 0 0 18px rgba(80, 110, 255, 0.35); }
@@ -2594,7 +2599,6 @@ input[type=range].rg:disabled { opacity: .4; }
               <div class="sel-sub" id="selSub">Нажмите на карточки, чтобы выбрать</div>
               <div class="stack">
                 <button class="btn qbtn" data-qbtn type="button" title="Качество скачивания"><svg class="i" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="M7 15V9l2.5 3L12 9v6M15 9h2a2 2 0 0 1 0 6h-2z"/></svg><span class="qtext">Качество: 1080p</span><svg class="i chev" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button>
-                <div class="chatopt" data-chatopt><button class="switch" type="button" role="switch" aria-checked="false" data-chaton title="Добавить к видео чат трансляции — каким он был в этот момент. Чат берётся из записи эфира."><span class="tr"></span>Чат трансляции</button><button class="cset" type="button" data-chatset hidden title="Настроить чат: размер, фон, положение"><svg class="i" viewBox="0 0 24 24"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg><span class="cs-t"></span></button></div>
                 <button class="btn" id="bDl" disabled><svg class="i" viewBox="0 0 24 24"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14"/></svg>Скачать в 1080p</button>
                 <button class="btn" id="bCopy" disabled><svg class="i" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="3"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg>Скопировать ссылки</button>
                 <button class="btn" id="bAll"><svg class="i" viewBox="0 0 24 24"><path d="m5 12 5 5 9-10"/></svg>Выбрать все найденные</button>
@@ -2670,7 +2674,7 @@ input[type=range].rg:disabled { opacity: .4; }
 <div class="veil" id="playVeil">
   <div class="modal player" role="dialog" aria-labelledby="pTitle">
     <div class="ph"><div class="grow"><h2 id="pTitle"></h2><div class="meta" id="pMeta"></div></div><button class="xbtn" id="pClose" aria-label="Закрыть"><svg class="i" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
-    <div class="vbox"><video id="pv" controls playsinline preload="auto"></video><div class="cvhost" id="pChat" hidden></div><div class="pchatmsg" id="pChatMsg" hidden></div><div class="vmsg" id="pMsg">Загружаю видео…</div></div>
+    <div class="vbox"><video id="pv" controls playsinline preload="auto"></video><div class="vmsg" id="pMsg">Загружаю видео…</div></div>
     <div class="trim">
       <div class="tl" id="tl"><div class="rng" id="tRng"></div><button class="hd" id="hA" aria-label="Начало фрагмента"></button><button class="hd" id="hB" aria-label="Конец фрагмента"></button><div class="ph2" id="tPh"></div></div>
       <div class="tinfo"><span>Начало: <b id="tA">0:00.0</b></span><span>Конец: <b id="tB">0:00.0</b></span><span>Длина фрагмента: <b id="tLen">0 с</b></span></div>
@@ -2680,7 +2684,6 @@ input[type=range].rg:disabled { opacity: .4; }
         <button class="btn slim" id="bPrev">Посмотреть фрагмент</button>
         <button class="btn slim" id="bTrimReset">Весь клип</button>
       </div>
-      <div class="chatopt" data-chatopt><button class="switch" type="button" role="switch" aria-checked="false" data-chaton title="Добавить к видео чат трансляции — каким он был в этот момент. Чат берётся из записи эфира."><span class="tr"></span>Чат трансляции</button><button class="cset" type="button" data-chatset hidden title="Настроить чат: размер, фон, положение"><svg class="i" viewBox="0 0 24 24"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg><span class="cs-t"></span></button></div>
     </div>
     <div class="foot">
       <span class="hint" id="pHint">Тяните ползунки или ставьте метки по ходу видео. Пробел — пауза.</span>
@@ -3212,9 +3215,8 @@ async function openPlayer(r) {
   if (P.row !== r) return;
   if (res.error) { $("pMsg").textContent = res.error; return; }
   v.src = res.url; v.play().catch(() => {});
-  pChatSync();
 }
-function closePlayer() { PC.id = null; PC.state = ""; $("pChat").hidden = true; $("pChatMsg").hidden = true; const v = $("pv"); v.pause(); v.removeAttribute("src"); v.load(); hideVeil($("playVeil")); P.row = null; }
+function closePlayer() { const v = $("pv"); v.pause(); v.removeAttribute("src"); v.load(); hideVeil($("playVeil")); P.row = null; }
 $("pClose").addEventListener("click", closePlayer);
 $("playVeil").addEventListener("mousedown", (e) => { if (e.target === $("playVeil")) closePlayer(); });
 $("pv").addEventListener("loadedmetadata", () => {
@@ -3584,7 +3586,7 @@ $("bCsv").addEventListener("click", async () => {
 
 async function startDownload(rows, quality) {
   if (!rows.length) return;
-  const r = await api("/api/download", { chat: chatParam(), quality: quality || S.quality || "1080", items: rows.map((x) => ({ id: x.id, title: x.title, broadcaster: x.broadcaster, start: x.start ?? null, end: x.end ?? null })) });
+  const r = await api("/api/download", { quality: quality || S.quality || "1080", items: rows.map((x) => ({ id: x.id, title: x.title, broadcaster: x.broadcaster, start: x.start ?? null, end: x.end ?? null })) });
   if (r.error) { showAlert(r.error); return; }
   if (r.keys && r.keys.length) S.dlFresh = r.keys[r.keys.length - 1];
   const busy = [...S.downloads.values()].some((x) => x.state === "wait" || x.state === "load");
@@ -4313,7 +4315,12 @@ function vodAlert(t) { $("vodAlert").innerHTML = t ? `<div class="alert">${esc(t
 async function vodSearch(more) {
   const q = $("vodQ").value.trim(); if (!q) { $("vodQ").focus(); return; }
   if (/twitch\.tv\/(?:[^/]+\/)?videos?\/\d+|^v?\d{6,}$/i.test(q)) { openVod({ id: q, title: "", login: "" }); return; }
-  if (!more) { VD.after = ""; VD.items = []; $("vodList").innerHTML = `<div class="vdload"><div class="spin"></div><span>${esc(t2("Ищу записи…", "Looking for videos…"))}</span></div>`; }
+  if (!more) {
+    VD.after = ""; VD.items = [];
+    $("vodList").innerHTML = '<div class="searching"><div class="lens-scene"><div class="tile"><i></i></div><div class="tile"><i></i></div><div class="tile"><i></i></div>' + LENS + '</div>' +
+      `<h3>${esc(t2("Ищем записи", "Looking for videos"))}<span class="dots"><span>.</span><span>.</span><span>.</span></span></h3><div class="numbers">${esc(t2("Спрашиваю у Twitch трансляции стримера", "Asking Twitch for the broadcasts of"))} ${esc(q)}</div><div class="hatch run"><i class="vsbar" style="width:4%"></i></div></div>`;
+    requestAnimationFrame(() => requestAnimationFrame(() => { const b = $("vodList").querySelector(".vsbar"); if (b) b.style.width = "88%"; }));
+  }
   vodAlert(""); $("vodGo").disabled = true; $("vodMore").disabled = true;
   const r = await api("/api/vods", { login: q, type: VD.type, after: more ? VD.after : "" }).catch(() => ({ error: t2("Нет связи с программой", "No connection to the app") }));
   $("vodGo").disabled = false; $("vodMore").disabled = false;
@@ -4474,7 +4481,7 @@ function setChatStyle(patch) {
   clearTimeout(chatSaveT); chatSaveT = setTimeout(() => api("/api/settings", { chat_style: S.chat.style }).catch(() => {}), 350);
 }
 function openChatSettings() {
-  const th = (isOpen($("playVeil")) && P.row && P.row.thumb) || (isOpen($("vodVeil")) && VD.cur && VD.cur.thumb) || "";
+  const th = (isOpen($("vodVeil")) && VD.cur && VD.cur.thumb) || "";
   const img = $("cPrevImg"); if (th) { img.src = th; img.hidden = false; } else { img.removeAttribute("src"); img.hidden = true; }
   showVeil($("chatVeil"));
   if (!CP.view) CP.view = new ChatView($("cHost"));
@@ -4498,40 +4505,9 @@ document.addEventListener("click", (e) => {
   if (!sw) return;
   S.chat.on = !S.chat.on;
   paintChat(); api("/api/settings", { chat_on: S.chat.on }).catch(() => {});
-  if (S.chat.on) toast(t2("Чат будет добавляться к скачанным видео. Размер и фон — в настройках рядом.", "Chat will be added to downloaded videos. Size and background are in the settings next to it."));
+  if (S.chat.on) toast(t2("Чат будет добавляться к скачанным записям. Размер и фон — в настройках рядом.", "Chat will be added to downloaded videos. Size and background are in the settings next to it."));
 });
-const PC = { view: null, id: null, state: "", raf: 0 };
-function pChatSync() {
-  const open = P.row && isOpen($("playVeil")), on = open && S.chat.on;
-  $("pChat").hidden = !on || PC.state !== "ok";
-  const msg = $("pChatMsg");
-  if (!on) { msg.hidden = true; return; }
-  if (!PC.view) PC.view = new ChatView($("pChat"));
-  PC.view.setStyle(S.chat.style);
-  if (PC.id !== P.row.id) {
-    PC.id = P.row.id; PC.state = "load"; PC.view.setMessages([]);
-    const id = P.row.id;
-    api("/api/chat/clip", { id }).then((r) => {
-      if (PC.id !== id) return;
-      if (r.error) { PC.state = "err"; PC.note = r.error; }
-      else { PC.view.setMessages(r.messages || []); PC.state = (r.messages || []).length ? "ok" : "err"; PC.note = r.note || ""; }
-      pChatSync();
-    }).catch(() => { if (PC.id === id) { PC.state = "err"; PC.note = t2("Не удалось загрузить чат", "Couldn't load the chat"); pChatSync(); } });
-  }
-  msg.hidden = PC.state === "ok";
-  msg.textContent = PC.state === "load" ? t2("Загружаю чат…", "Loading chat…") : (PC.note || "");
-  if (PC.state === "ok" && !PC.raf) PC.raf = requestAnimationFrame(pChatTick);
-}
-function pChatTick() {
-  if (!(P.row && isOpen($("playVeil")) && S.chat.on && PC.state === "ok")) { PC.raf = 0; return; }
-  const v = $("pv"), box = v.parentElement, bw = box.clientWidth, bh = box.clientHeight;
-  const vw = v.videoWidth || 1920, vh = v.videoHeight || 1080, sc = Math.min(bw / vw, bh / vh);
-  const dw = vw * sc, dh = vh * sc;
-  PC.view.setFrame(Math.round(1080 * vw / vh), 1080);
-  PC.view.fit((bw - dw) / 2, (bh - dh) / 2, dh);
-  PC.view.render(v.currentTime || 0);
-  PC.raf = requestAnimationFrame(pChatTick);
-}
+function pChatSync() {}
 function vdPaint() {
   const info = VD.info; if (!info) return;
   const full = VD.mode === "full";
@@ -5144,7 +5120,7 @@ def make_handler(ctx):
             if path == "/api/download/clear":
                 ctx.dlq.clear()
                 return {"items": ctx.dlq.view()}
-            if path.startswith("/api/vod") or path == "/api/chat/clip":
+            if path.startswith("/api/vod"):
                 return self.live_route(path, b)
             if path == "/api/clipurl":
                 cid = str(b.get("id", ""))
@@ -5240,19 +5216,6 @@ def make_handler(ctx):
                     v["recording"] = bool(sid) and v["streamId"] == sid
                 return {"user": {"login": u["login"], "name": u.get("display_name") or u["login"], "avatar": u.get("profile_image_url") or ""},
                         "items": items, "after": (d.get("pagination") or {}).get("cursor") or ""}
-            if path == "/api/chat/clip":
-                slug = re.sub(r"[^A-Za-z0-9_-]", "", str(b.get("id") or ""))[:120]
-                if not slug:
-                    raise ValueError(L("Неверный клип.", "Invalid clip."))
-                cs = clip_source(slug)
-                if not cs.get("video") or cs.get("offset") is None:
-                    return {"messages": [], "note": L("Запись трансляции удалена — чата для этого клипа нет.", "The broadcast video was deleted — this clip has no chat.")}
-                off = float(cs["offset"])
-                dur = float(cs.get("duration") or 60)
-                msgs = fetch_chat(cs["video"], max(0.0, off - 30), off + dur + 1)
-                assets = ChatAssets.get(cs.get("channel") or "")
-                out = [{"t": round(m["t"] - off, 2), "k": assets.json_tokens(m)} for m in msgs[-1500:]]
-                return {"messages": out, "note": "" if out else L("В чате в этот момент не было сообщений.", "There were no chat messages at that moment.")}
             if path == "/api/vod/info":
                 vid = parse_vod_id(b.get("id"))
                 if not vid:
@@ -5361,7 +5324,7 @@ def make_handler(ctx):
             quality = str(b.get("quality") or ctx.cfg.get("quality") or "1080")
             if quality not in QUALITIES:
                 quality = "1080"
-            chat = chat_style(b.get("chat"))
+            chat = None
             return {"keys": ctx.dlq.add(items, quality, chat)}
 
     return Handler
