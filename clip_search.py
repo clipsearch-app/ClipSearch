@@ -1315,7 +1315,8 @@ def add_chat(video_path, vod_id, channel_id, start, mode, cancel=None, progress=
     msgs = fetch_chat(vod_id, max(0.0, start - 30), start + dur, cancel, (lambda p: progress(p * 15 // 100)) if progress else None)
     ff = find_ffmpeg()
     if mode == "file":
-        cw, ch = max(320, round(h * 0.56)) // 2 * 2, h // 2 * 2
+        ch = max(1080, h) // 2 * 2
+        cw = round(ch * 0.56) // 2 * 2
         rend = ChatRenderer(msgs, cw, ch, channel_id, transparent=True, cancel=cancel)
         out = os.path.splitext(name_base or video_path)[0] + L(" - чат", " - chat") + ".mov"
         tmp = out + ".part.mov"
