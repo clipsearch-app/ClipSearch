@@ -45,14 +45,14 @@ def L(ru, en):
 
 
 RELEASE_NOTES = """- Записи трансляций: скачивайте их целиком или вырезайте нужный кусок, в том числе у эфира, который ещё идёт.
-- Чат трансляции на видео: включите галочку — и к записи или клипу добавится чат, каким он был в тот момент. Можно поверх видео или отдельным файлом с прозрачным фоном.
+- Чат трансляции на видео: включите переключатель — и к записи или клипу добавится чат, каким он был в тот момент. Сообщения плавно появляются по ходу видео. Размер, высоту, угол и фон можно настроить, а в плеере сразу видно, как это будет выглядеть. Можно поверх видео или отдельным файлом с прозрачным фоном.
 - ClipSearch теперь есть для macOS: Apple Silicon (M1 и новее) и Intel, macOS 11 и новее.
 - Установщик для Windows ставит именно ту версию, которую вы скачали.
 
 <!-- en -->
 ### English
 - Broadcast videos: download them whole or cut out the part you need, even from a stream that is still live.
-- Stream chat on videos: turn on the switch and the chat is added to a video or clip as it was at that moment — on top of the video or as a separate file with a transparent background.
+- Stream chat on videos: turn on the switch and the chat is added to a video or clip as it was at that moment, with messages smoothly appearing as the video plays. Size, height, corner and background are adjustable, and the player shows a live preview. On top of the video or as a separate file with a transparent background.
 - ClipSearch is now available for macOS: Apple Silicon (M1 and newer) and Intel, macOS 11 or later.
 - The Windows installer now installs exactly the version you downloaded."""
 GITHUB_API = os.environ.get("CLIPS_GITHUB_API", "https://api.github.com")
@@ -882,8 +882,45 @@ def quality_list(vs):
     return out
 
 
-CHAT_FPS = 20
-CHAT_MODES = ("right", "left", "file")
+CHAT_FPS = 30
+CHAT_SLIDE = 0.28
+CHAT_POS = ("tl", "tr", "bl", "br")
+CHAT_DEFAULT = {"mode": "overlay", "pos": "br", "size": 100, "height": 40, "bg": True, "opacity": 60}
+
+
+def chat_style(v):
+    if v is None or v is False:
+        return None
+    d = dict(CHAT_DEFAULT)
+    if isinstance(v, str):
+        if v == "file":
+            d["mode"] = "file"
+        elif v == "left":
+            d["pos"] = "bl"
+        elif v not in ("right", "overlay"):
+            return None
+        return d
+    if not isinstance(v, dict):
+        return None
+    if v.get("mode") in ("overlay", "file"):
+        d["mode"] = v["mode"]
+    if v.get("pos") in CHAT_POS:
+        d["pos"] = v["pos"]
+    for k, lo, hi in (("size", 50, 200), ("height", 15, 100), ("opacity", 0, 100)):
+        try:
+            d[k] = int(round(min(hi, max(lo, float(v.get(k, d[k]))))))
+        except (TypeError, ValueError):
+            pass
+    if "bg" in v:
+        d["bg"] = bool(v["bg"])
+    return d
+
+
+def chat_geom(vw, vh, st):
+    fs = max(10, round(vh / 54 * st["size"] / 100))
+    cw = min(int(vw * 0.9), round(fs * 16)) // 2 * 2
+    ch = min(vh, max(round(fs * 4.5), round(vh * st["height"] / 100))) // 2 * 2
+    return fs, cw, ch, round(vh * 0.02)
 BTTV_API = os.environ.get("CLIPS_BTTV_API", "https://api.betterttv.net/3")
 FFZ_API = os.environ.get("CLIPS_FFZ_API", "https://api.frankerfacez.com/v1")
 STV_API = os.environ.get("CLIPS_7TV_API", "https://7tv.io/v3")
@@ -1075,25 +1112,13 @@ def find_fonts():
     return {k: next((p for p in v if os.path.isfile(p)), None) for k, v in cands.items()}
 
 
-class ChatRenderer:
+_ASSETS = {}
+_ASSETS_LOCK = threading.Lock()
 
-    def __init__(self, messages, width, height, channel_id, transparent=False, cancel=None):
-        from PIL import ImageFont
-        self.W, self.H, self.transparent, self.cancel = width, height, transparent, cancel
-        self.fs = max(14, round(height / 38))
-        self.pad = round(self.fs * 0.6)
-        self.line = round(self.fs * 1.45)
-        self.ih = round(self.fs * 1.3)
-        fonts = find_fonts()
-        def load(p, size):
-            try:
-                return ImageFont.truetype(p, size) if p else ImageFont.load_default(size)
-            except Exception:
-                return ImageFont.load_default(size)
-        self.f_reg = load(fonts["regular"], self.fs)
-        self.f_bold = load(fonts["bold"] or fonts["regular"], self.fs)
-        self.f_cjk = load(fonts["cjk"], self.fs) if fonts["cjk"] else self.f_reg
-        self.cache = ImageCache()
+
+class ChatAssets:
+
+    def __init__(self, channel_id):
         try:
             self.third = third_party_emotes(channel_id) if channel_id else {}
         except Exception as e:
@@ -1104,23 +1129,35 @@ class ChatRenderer:
         except Exception as e:
             log(f"badges: {e!r}")
             self.badges = {}
-        self.msgs = messages
-        self.rows = {}
+        self.at = time.time()
 
-    def color(self, m):
+    @staticmethod
+    def get(channel_id):
+        key = str(channel_id or "")
+        with _ASSETS_LOCK:
+            a = _ASSETS.get(key)
+            if a and time.time() - a.at < 1800:
+                return a
+        a = ChatAssets(key)
+        with _ASSETS_LOCK:
+            _ASSETS[key] = a
+        return a
+
+    @staticmethod
+    def color(m):
         c = m.get("color") or ""
         if not re.fullmatch(r"#[0-9a-fA-F]{6}", c):
             import zlib
             c = NAME_COLORS[zlib.crc32(m["login"].encode()) % len(NAME_COLORS)]
         r, g, b = int(c[1:3], 16), int(c[3:5], 16), int(c[5:7], 16)
-        if 0.299 * r + 0.587 * g + 0.114 * b < 90:
+        if 0.299 * r + 0.587 * g + 0.114 * b < 110:
             r, g, b = (min(255, int(v * 1.6 + 60)) for v in (r, g, b))
         return (r, g, b, 255)
 
     def tokens(self, m):
         toks = []
         for key in m["badges"][:3]:
-            u = self.badges.get(key)
+            u = self.badges.get(tuple(key))
             if u:
                 toks.append(("img", u, False))
         toks.append(("text", m["name"], "bold", self.color(m)))
@@ -1139,12 +1176,54 @@ class ChatRenderer:
                 for em in EMOJI_RE.finditer(word):
                     if em.start() > pos:
                         toks.append(("text", word[pos:em.start()], "reg", (235, 238, 255, 255)))
-                    cps = [f"{ord(ch):x}" for ch in em.group(0) if ch != "\ufe0f"]
+                    cps = [f"{ord(ch):x}" for ch in em.group(0) if ch != "️"]
                     toks.append(("img", f"{EMOJI_CDN}/{'-'.join(cps)}.png", True))
                     pos = em.end()
                 if pos < len(word):
                     toks.append(("text", word[pos:], "reg", (235, 238, 255, 255)))
         return toks
+
+    def json_tokens(self, m):
+        out = []
+        for t in self.tokens(m):
+            if t[0] == "img":
+                out.append({"img": t[1], "e": bool(t[2])})
+            else:
+                out.append({"tx": t[1], "b": t[2] == "bold", "c": "#%02x%02x%02x" % t[3][:3]})
+        return out
+
+
+def _ease(x):
+    x = min(1.0, max(0.0, x))
+    return 1 - (1 - x) ** 3
+
+
+class ChatRenderer:
+
+    def __init__(self, messages, width, height, channel_id, fs=None, bg=True, opacity=60, top=False, cancel=None, assets=None):
+        from PIL import ImageFont
+        self.W, self.H, self.cancel = width, height, cancel
+        self.bg, self.opacity, self.top = bool(bg), max(0, min(100, opacity)), bool(top)
+        self.transparent = not self.bg
+        self.fs = fs or max(14, round(height / 38))
+        self.pad = round(self.fs * 0.6)
+        self.line = round(self.fs * 1.45)
+        self.ih = round(self.fs * 1.3)
+        self.gap = max(2, self.fs // 5)
+        fonts = find_fonts()
+        def load(p, size):
+            try:
+                return ImageFont.truetype(p, size) if p else ImageFont.load_default(size)
+            except Exception:
+                return ImageFont.load_default(size)
+        self.f_reg = load(fonts["regular"], self.fs)
+        self.f_bold = load(fonts["bold"] or fonts["regular"], self.fs)
+        self.f_cjk = load(fonts["cjk"], self.fs) if fonts["cjk"] else self.f_reg
+        self.cache = ImageCache()
+        self.assets = assets or ChatAssets.get(channel_id)
+        self.msgs = messages
+        self.rows = {}
+        self._mask = None
 
     def font_for(self, kind, text):
         if CJK_RE.search(text):
@@ -1158,7 +1237,7 @@ class ChatRenderer:
         m = self.msgs[i]
         maxw = self.W - self.pad * 2
         items, x, y = [], 0, 0
-        for tok in self.tokens(m):
+        for tok in self.assets.tokens(m):
             if tok[0] == "img":
                 fr = self.cache.frames(tok[1], self.ih if tok[2] else round(self.fs * 1.0))
                 if not fr:
@@ -1206,54 +1285,103 @@ class ChatRenderer:
                 _, ix, iy, text, f, col = it
                 ty = iy + (self.line - self.fs) // 2 - round(self.fs * 0.12)
                 if self.transparent:
-                    dr.text((self.pad + ix, ty), text, font=f, fill=col, stroke_width=max(2, self.fs // 10), stroke_fill=(0, 0, 0, 230))
+                    dr.text((self.pad + ix, ty), text, font=f, fill=col, stroke_width=max(2, self.fs // 9), stroke_fill=(0, 0, 0, 235))
                 else:
                     dr.text((self.pad + ix, ty), text, font=f, fill=col)
         self.rows[i] = (img, anim)
         return self.rows[i]
 
-    def frames(self, start, duration):
-        from PIL import Image, ImageDraw
+    def layout(self, t):
         import bisect
-        times = [m["t"] for m in self.msgs]
+        last = bisect.bisect_right(self.times, t)
+        avail = self.H - self.pad * 2
+        vis, used, disp, fades = [], 0, 0.0, {}
+        for i in range(last - 1, -1, -1):
+            img, _ = self.row(i)
+            hh = img.height + self.gap
+            age = t - self.msgs[i]["t"]
+            if age < CHAT_SLIDE:
+                p = _ease(age / CHAT_SLIDE)
+                disp += hh * (1 - p)
+                fades[i] = p
+            vis.append(i)
+            used += hh
+            if used - disp > avail + self.line * 2 or len(vis) > 80:
+                break
+        return last, vis, used, disp, fades
+
+    def fade_mask(self):
+        if self._mask is None:
+            from PIL import Image
+            z = max(4, round(self.fs * 1.6))
+            col = Image.linear_gradient("L").resize((1, z))
+            m = Image.new("L", (1, self.H), 255)
+            m.paste(col, (0, 0))
+            self._mask = m.resize((self.W, self.H))
+        return self._mask
+
+    def frames(self, start, duration):
+        from PIL import Image, ImageDraw, ImageChops
+        self.times = [m["t"] for m in self.msgs]
         n = max(1, int(round(duration * CHAT_FPS)))
         prev_key, prev = None, None
-        gap = max(2, self.fs // 5)
+        half = round(self.pad * 0.5)
+        avail = self.H - self.pad * 2
         for k in range(n):
             if self.cancel is not None and self.cancel.is_set():
                 raise Cancelled()
             t = start + k / CHAT_FPS
-            last = bisect.bisect_right(times, t)
-            vis, used = [], 0
-            for i in range(last - 1, -1, -1):
-                img, anim = self.row(i)
-                if used + img.height + gap > self.H - self.pad * 2:
-                    break
-                vis.append(i)
-                used += img.height + gap
-                if len(vis) > 60:
-                    break
+            last, vis, used, disp, fades = self.layout(t)
             ms = int((t - start) * 1000)
-            if k % 200 == 0 and len(self.rows) > 300:
+            if k % 300 == 0 and len(self.rows) > 300:
                 for old in [j for j in self.rows if j < last - 150]:
                     self.rows.pop(old, None)
             anims = [a for i in vis for a in self.rows[i][1]]
-            key = (tuple(vis), tuple(self.anim_index(a, ms) for a in anims))
+            shown = used - disp
+            if self.top and shown <= avail:
+                bottom = self.pad + used
+                bg_bot = self.pad + shown + half
+            else:
+                bottom = self.H - self.pad + disp
+                bg_bot = self.H - half
+            key = (tuple(vis), round(disp), tuple(round(v * 20) for v in fades.values()), tuple(self.anim_index(a, ms) for a in anims))
             if key != prev_key:
                 frame = Image.new("RGBA", (self.W, self.H), (0, 0, 0, 0))
-                y = self.H - self.pad
-                if vis and not self.transparent:
-                    top = y - used - gap
-                    bg = Image.new("RGBA", (self.W, self.H), (0, 0, 0, 0))
-                    ImageDraw.Draw(bg).rounded_rectangle((round(self.pad * 0.5), max(0, top), self.W - round(self.pad * 0.5), self.H - round(self.pad * 0.5)),
-                                                         radius=self.fs // 2, fill=(8, 12, 34, 150))
-                    frame.alpha_composite(bg)
+                if vis and self.bg and self.opacity > 0:
+                    bg_top = max(half, bottom - used - half) if not (self.top and shown <= avail) else half
+                    if bg_bot - bg_top > self.fs * 0.8:
+                        ImageDraw.Draw(frame).rounded_rectangle((half, int(bg_top), self.W - half, int(bg_bot)), radius=max(4, round(self.fs * 0.55)),
+                                                                fill=(8, 12, 34, int(255 * self.opacity / 100)))
+                layer = Image.new("RGBA", (self.W, self.H), (0, 0, 0, 0))
+                y = bottom
                 for i in vis:
                     img, anim = self.rows[i]
-                    y -= img.height + gap
-                    frame.alpha_composite(img, (0, y + gap))
+                    y -= img.height + self.gap
+                    yy = int(round(y + self.gap))
+                    if yy >= self.H or yy + img.height <= 0:
+                        continue
+                    if i in fades and fades[i] < 0.999:
+                        a = img.getchannel("A").point(lambda v, f=fades[i]: int(v * f))
+                        im2 = img.copy()
+                        im2.putalpha(a)
+                        piece = im2
+                    else:
+                        piece = img
+                    layer.alpha_composite(piece, (0, max(0, yy)), (0, max(0, -yy)))
                     for ax, ay, frs, durs, total in anim:
-                        frame.alpha_composite(frs[self.anim_index((ax, ay, frs, durs, total), ms)], (ax, max(0, y + gap + ay)))
+                        fr = frs[self.anim_index((ax, ay, frs, durs, total), ms)]
+                        py = yy + ay
+                        if py + fr.height > 0 and py < self.H:
+                            if i in fades and fades[i] < 0.999:
+                                fr = fr.copy()
+                                fr.putalpha(fr.getchannel("A").point(lambda v, f=fades[i]: int(v * f)))
+                            layer.alpha_composite(fr, (ax, max(0, py)), (0, max(0, -py)))
+                cut = int(bg_bot) if self.bg else self.H
+                if cut < self.H:
+                    layer.paste((0, 0, 0, 0), (0, cut, self.W, self.H))
+                if used - disp > avail - 1:
+                    layer.putalpha(ImageChops.multiply(layer.getchannel("A"), self.fade_mask()))
+                frame.alpha_composite(layer)
                 prev, prev_key = frame.tobytes(), key
             yield prev
 
@@ -1308,32 +1436,34 @@ def run_ffmpeg_with_frames(cmd, frames, n, cancel=None, progress=None):
         raise TwitchError(L("Не удалось наложить чат (ffmpeg). Подробности в log.txt.", "Couldn't add the chat (ffmpeg). See log.txt for details."))
 
 
-def add_chat(video_path, vod_id, channel_id, start, mode, cancel=None, progress=None, name_base=None):
+def add_chat(video_path, vod_id, channel_id, start, style, cancel=None, progress=None, name_base=None):
+    st = chat_style(style) or dict(CHAT_DEFAULT)
     w, h, dur = probe_video(video_path)
     if dur <= 0:
         raise TwitchError(L("Не удалось прочитать длину видео.", "Couldn't read the video length."))
     msgs = fetch_chat(vod_id, max(0.0, start - 30), start + dur, cancel, (lambda p: progress(p * 15 // 100)) if progress else None)
     ff = find_ffmpeg()
-    if mode == "file":
-        ch = max(1080, h) // 2 * 2
-        cw = round(ch * 0.56) // 2 * 2
-        rend = ChatRenderer(msgs, cw, ch, channel_id, transparent=True, cancel=cancel)
+    top = st["pos"] in ("tl", "tr")
+    n = int(round(dur * CHAT_FPS))
+    if st["mode"] == "file":
+        rh = max(1080, h)
+        fs, cw, ch, _ = chat_geom(round(rh * 16 / 9), rh, st)
+        rend = ChatRenderer(msgs, cw, ch, channel_id, fs=fs, bg=st["bg"], opacity=st["opacity"], top=top, cancel=cancel)
         out = os.path.splitext(name_base or video_path)[0] + L(" - чат", " - chat") + ".mov"
         tmp = out + ".part.mov"
         cmd = [ff, "-hide_banner", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgba", "-s", f"{cw}x{ch}", "-r", str(CHAT_FPS), "-i", "pipe:0",
                "-c:v", "prores_ks", "-profile:v", "4444", "-pix_fmt", "yuva444p10le", "-vendor", "apl0", "-qscale:v", "9", tmp]
-        n = int(round(dur * CHAT_FPS))
         run_ffmpeg_with_frames(cmd, rend.frames(start, dur), n, cancel, (lambda p: progress(15 + p * 85 // 100)) if progress else None)
         os.replace(tmp, out)
         return video_path, out, len(msgs)
-    cw, ch = max(300, round(h * 0.5)) // 2 * 2, h // 2 * 2
-    rend = ChatRenderer(msgs, cw, ch, channel_id, transparent=False, cancel=cancel)
-    x = "0" if mode == "left" else "main_w-overlay_w"
+    fs, cw, ch, m = chat_geom(w, h, st)
+    rend = ChatRenderer(msgs, cw, ch, channel_id, fs=fs, bg=st["bg"], opacity=st["opacity"], top=top, cancel=cancel)
+    x = str(m) if st["pos"] in ("tl", "bl") else f"main_w-overlay_w-{m}"
+    y = str(m) if top else f"main_h-overlay_h-{m}"
     tmp = video_path + (".chat.mp4" if ".part" in video_path else ".part.chat.mp4")
     cmd = [ff, "-hide_banner", "-y", "-loglevel", "error", "-i", video_path, "-f", "rawvideo", "-pix_fmt", "rgba", "-s", f"{cw}x{ch}", "-r", str(CHAT_FPS), "-i", "pipe:0",
-           "-filter_complex", f"[0:v][1:v]overlay=x={x}:y=0:eof_action=repeat:format=auto,format=yuv420p[v]", "-map", "[v]", "-map", "0:a?",
+           "-filter_complex", f"[0:v][1:v]overlay=x={x}:y={y}:eof_action=repeat:format=auto,format=yuv420p[v]", "-map", "[v]", "-map", "0:a?",
            "-c:v", "libx264", "-preset", "veryfast", "-crf", "19", "-c:a", "copy", "-movflags", "+faststart", tmp]
-    n = int(round(dur * CHAT_FPS))
     run_ffmpeg_with_frames(cmd, rend.frames(start, dur), n, cancel, (lambda p: progress(15 + p * 85 // 100)) if progress else None)
     os.replace(tmp, video_path)
     return video_path, None, len(msgs)
@@ -1371,7 +1501,7 @@ def download_vod(src, folder, progress=None, cancel=None):
     name = f'{safe_name(src.get("login") or "twitch")} - {safe_name(src.get("title") or "VOD")} - v{src["id"]}{tail}{ext}'
     path = os.path.join(folder, name)
     tmp = path + ".part"
-    chat = src.get("chat") if src.get("chat") in CHAT_MODES and not audio else None
+    chat = chat_style(src.get("chat")) if not audio else None
     p1 = (lambda p: progress(p * 45 // 100)) if (progress and chat) else progress
     muted = sum(1 for _, s in chosen if s["muted"])
     notes = [L("Twitch заглушил звук в части этого отрезка", "Twitch muted the audio in part of this range")] if muted else []
@@ -2286,6 +2416,57 @@ input, textarea, .errmsg { user-select: text; -webkit-user-select: text; }
 @media (max-width: 900px) { .vd { grid-template-columns: 1fr; } }
 @keyframes lvrise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
 body.glass-os .vd { background: linear-gradient(150deg, rgba(60, 82, 180, 0.16), rgba(12, 18, 56, 0.26)); }
+
+.chatopt { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
+.cset { display: inline-flex; align-items: center; gap: 8px; height: 32px; padding: 0 12px 0 10px; border-radius: 20px; max-width: 100%;
+  background: rgba(10, 16, 46, 0.42); border: 1px solid rgba(150, 172, 255, 0.22); color: var(--text); font-size: 12.5px;
+  transition: border-color .2s, background .2s, transform .3s var(--spring); animation: chipIn .35s var(--spring) both; }
+.cset:hover { border-color: #8aa0ff; background: rgba(60, 90, 230, 0.3); }
+.cset:active { transform: scale(.96); }
+.cset .i { width: 15px; height: 15px; flex: none; }
+.cset .cs-t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cset .cs-t b { font-weight: 600; }
+.chatdlg { width: 760px; }
+.chatdlg .ph { display: flex; align-items: center; gap: 14px; margin-bottom: 14px; }
+.chatdlg .ph h2 { margin: 0; font-weight: 500; font-size: 20px; flex: 1; }
+.chatdlg .xbtn { width: 38px; height: 38px; border-radius: 50%; border: 1px solid var(--line); color: var(--muted); display: grid; place-items: center; flex: none; }
+.chatdlg .xbtn:hover { color: #fff; border-color: #8aa0ff; }
+.cprev { position: relative; aspect-ratio: 16 / 9; border-radius: 16px; overflow: hidden; border: 1px solid var(--line);
+  background: radial-gradient(circle at 28% 32%, rgba(255, 150, 80, .55), transparent 45%), radial-gradient(circle at 74% 64%, rgba(120, 90, 255, .6), transparent 50%), linear-gradient(160deg, #26306e, #0b1236); }
+.cprev > img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.cprev .cpnote { position: absolute; left: 10px; top: 10px; z-index: 3; font-size: 11.5px; padding: 2px 9px; border-radius: 10px; background: rgba(5, 8, 24, .7); color: var(--muted); }
+.cvhost { position: absolute; left: 0; top: 0; transform-origin: 0 0; pointer-events: none; z-index: 2; overflow: hidden; }
+.cvb { position: absolute; }
+.cvbg { position: absolute; transition: none; }
+.cvclip { position: absolute; left: 0; top: 0; width: 100%; overflow: hidden; }
+.cvr { position: absolute; left: 0; top: 0; box-sizing: border-box; color: #ebeeff; overflow-wrap: anywhere; will-change: transform, opacity;
+  font-family: "Segoe UI", Arial, "Helvetica Neue", sans-serif; }
+.cvr b { font-weight: 700; }
+.cvr img { vertical-align: middle; position: relative; }
+.cvb.nobg .cvr { text-shadow: var(--cvo); }
+.cgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 26px; margin-top: 16px; }
+.crow { display: flex; align-items: center; gap: 12px; min-height: 38px; }
+.crow .lbl { color: var(--muted); font-size: 13px; width: 108px; flex: none; }
+.crow b { width: 42px; text-align: right; font-weight: 500; font-variant-numeric: tabular-nums; font-size: 13px; }
+.crow .seg .chip { height: 32px; padding: 0 12px; font-size: 12.5px; }
+.crow.wide { grid-column: 1 / -1; }
+.crow .grow { flex: 1; }
+.crow .lbl.short { width: auto; }
+.crow .seg { flex-wrap: nowrap; }
+.cprev .cpnote { left: 50%; transform: translateX(-50%); }
+.cpos { display: grid; grid-template-columns: repeat(2, 38px); grid-template-rows: repeat(2, 24px); gap: 4px; padding: 4px; border-radius: 10px; border: 1px solid var(--line); background: rgba(8, 13, 38, 0.6); }
+.cpos button { border-radius: 6px; border: 1px solid rgba(150, 172, 255, 0.16); background: rgba(30, 44, 98, 0.35); padding: 0; transition: background .2s, border-color .2s, box-shadow .2s; }
+.cpos button:hover { border-color: #8aa0ff; }
+.cpos button.on { background: linear-gradient(180deg, #5a7bff, #3f5ee8); border-color: transparent; box-shadow: 0 0 12px rgba(80, 110, 255, 0.5); }
+.cpos.off { opacity: .4; pointer-events: none; }
+input[type=range].rg { -webkit-appearance: none; appearance: none; flex: 1; min-width: 0; height: 22px; background: transparent; margin: 0; }
+input[type=range].rg::-webkit-slider-runnable-track { height: 6px; border-radius: 4px; background: linear-gradient(90deg, #5a7bff var(--p, 50%), rgba(8, 13, 38, 0.9) var(--p, 50%)); border: 1px solid var(--line); }
+input[type=range].rg::-webkit-slider-thumb { -webkit-appearance: none; width: 18px; height: 18px; margin-top: -7px; border-radius: 50%; background: #fff; border: 0; box-shadow: 0 0 0 4px rgba(91, 124, 255, .35), 0 2px 6px rgba(0, 0, 0, .4); transition: transform .2s var(--spring); }
+input[type=range].rg:active::-webkit-slider-thumb { transform: scale(1.15); }
+input[type=range].rg:disabled { opacity: .4; }
+.cnote { color: var(--muted); font-size: 12.5px; margin-top: 12px; }
+.pchatmsg { position: absolute; left: 12px; top: 12px; z-index: 3; font-size: 12px; padding: 3px 10px; border-radius: 10px; background: rgba(5, 8, 24, .78); color: var(--muted); pointer-events: none; }
+@media (max-width: 760px) { .cgrid { grid-template-columns: 1fr; } }
 </style>
 </head>
 <body>
@@ -2413,7 +2594,7 @@ body.glass-os .vd { background: linear-gradient(150deg, rgba(60, 82, 180, 0.16),
               <div class="sel-sub" id="selSub">Нажмите на карточки, чтобы выбрать</div>
               <div class="stack">
                 <button class="btn qbtn" data-qbtn type="button" title="Качество скачивания"><svg class="i" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="M7 15V9l2.5 3L12 9v6M15 9h2a2 2 0 0 1 0 6h-2z"/></svg><span class="qtext">Качество: 1080p</span><svg class="i chev" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button>
-                <div class="chatopt" data-chatopt><button class="switch" type="button" role="switch" aria-checked="false" data-chaton title="Добавить к видео чат трансляции — каким он был в этот момент. Чат берётся из записи эфира."><span class="tr"></span>Чат трансляции</button><div class="cmodes" data-cmodes hidden><button class="chip" type="button" data-cm="right">Справа</button><button class="chip" type="button" data-cm="left">Слева</button><button class="chip" type="button" data-cm="file">Отдельным файлом</button></div></div>
+                <div class="chatopt" data-chatopt><button class="switch" type="button" role="switch" aria-checked="false" data-chaton title="Добавить к видео чат трансляции — каким он был в этот момент. Чат берётся из записи эфира."><span class="tr"></span>Чат трансляции</button><button class="cset" type="button" data-chatset hidden title="Настроить чат: размер, фон, положение"><svg class="i" viewBox="0 0 24 24"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg><span class="cs-t"></span></button></div>
                 <button class="btn" id="bDl" disabled><svg class="i" viewBox="0 0 24 24"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14"/></svg>Скачать в 1080p</button>
                 <button class="btn" id="bCopy" disabled><svg class="i" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="3"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg>Скопировать ссылки</button>
                 <button class="btn" id="bAll"><svg class="i" viewBox="0 0 24 24"><path d="m5 12 5 5 9-10"/></svg>Выбрать все найденные</button>
@@ -2489,7 +2670,7 @@ body.glass-os .vd { background: linear-gradient(150deg, rgba(60, 82, 180, 0.16),
 <div class="veil" id="playVeil">
   <div class="modal player" role="dialog" aria-labelledby="pTitle">
     <div class="ph"><div class="grow"><h2 id="pTitle"></h2><div class="meta" id="pMeta"></div></div><button class="xbtn" id="pClose" aria-label="Закрыть"><svg class="i" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
-    <div class="vbox"><video id="pv" controls playsinline preload="auto"></video><div class="vmsg" id="pMsg">Загружаю видео…</div></div>
+    <div class="vbox"><video id="pv" controls playsinline preload="auto"></video><div class="cvhost" id="pChat" hidden></div><div class="pchatmsg" id="pChatMsg" hidden></div><div class="vmsg" id="pMsg">Загружаю видео…</div></div>
     <div class="trim">
       <div class="tl" id="tl"><div class="rng" id="tRng"></div><button class="hd" id="hA" aria-label="Начало фрагмента"></button><button class="hd" id="hB" aria-label="Конец фрагмента"></button><div class="ph2" id="tPh"></div></div>
       <div class="tinfo"><span>Начало: <b id="tA">0:00.0</b></span><span>Конец: <b id="tB">0:00.0</b></span><span>Длина фрагмента: <b id="tLen">0 с</b></span></div>
@@ -2499,7 +2680,7 @@ body.glass-os .vd { background: linear-gradient(150deg, rgba(60, 82, 180, 0.16),
         <button class="btn slim" id="bPrev">Посмотреть фрагмент</button>
         <button class="btn slim" id="bTrimReset">Весь клип</button>
       </div>
-      <div class="chatopt" data-chatopt><button class="switch" type="button" role="switch" aria-checked="false" data-chaton title="Добавить к видео чат трансляции — каким он был в этот момент. Чат берётся из записи эфира."><span class="tr"></span>Чат трансляции</button><div class="cmodes" data-cmodes hidden><button class="chip" type="button" data-cm="right">Справа</button><button class="chip" type="button" data-cm="left">Слева</button><button class="chip" type="button" data-cm="file">Отдельным файлом</button></div></div>
+      <div class="chatopt" data-chatopt><button class="switch" type="button" role="switch" aria-checked="false" data-chaton title="Добавить к видео чат трансляции — каким он был в этот момент. Чат берётся из записи эфира."><span class="tr"></span>Чат трансляции</button><button class="cset" type="button" data-chatset hidden title="Настроить чат: размер, фон, положение"><svg class="i" viewBox="0 0 24 24"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg><span class="cs-t"></span></button></div>
     </div>
     <div class="foot">
       <span class="hint" id="pHint">Тяните ползунки или ставьте метки по ходу видео. Пробел — пауза.</span>
@@ -2554,10 +2735,25 @@ body.glass-os .vd { background: linear-gradient(150deg, rgba(60, 82, 180, 0.16),
         </div>
       </div>
       <div class="seg solid" id="vdQ"><span class="lbl">Качество</span></div>
-      <div class="chatopt" data-chatopt><button class="switch" type="button" role="switch" aria-checked="false" data-chaton title="Добавить к видео чат трансляции — каким он был в этот момент. Чат берётся из записи эфира."><span class="tr"></span>Чат трансляции</button><div class="cmodes" data-cmodes hidden><button class="chip" type="button" data-cm="right">Справа</button><button class="chip" type="button" data-cm="left">Слева</button><button class="chip" type="button" data-cm="file">Отдельным файлом</button></div></div>
+      <div class="chatopt" data-chatopt><button class="switch" type="button" role="switch" aria-checked="false" data-chaton title="Добавить к видео чат трансляции — каким он был в этот момент. Чат берётся из записи эфира."><span class="tr"></span>Чат трансляции</button><button class="cset" type="button" data-chatset hidden title="Настроить чат: размер, фон, положение"><svg class="i" viewBox="0 0 24 24"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg><span class="cs-t"></span></button></div>
       <div class="vdnotes" id="vdNotes"></div>
     </div>
     <div class="foot"><button class="btn" id="vdCancel" type="button">Отмена</button><button class="btn primary" id="vdGo" type="button" disabled><svg class="i" viewBox="0 0 24 24"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14"/></svg><span id="vdGoT">Скачать</span></button></div>
+  </div>
+</div>
+<div class="veil" id="chatVeil">
+  <div class="modal chatdlg" role="dialog" aria-labelledby="chTitle">
+    <div class="ph"><h2 id="chTitle">Чат на видео</h2><button class="xbtn" id="chClose" type="button" aria-label="Закрыть"><svg class="i" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
+    <div class="cprev" id="cPrev"><img id="cPrevImg" alt="" hidden><div class="cvhost" id="cHost"></div><span class="cpnote">Пример</span></div>
+    <div class="cgrid">
+      <div class="crow wide"><span class="lbl">Как добавить</span><div class="seg solid" id="cMode"><button class="chip" type="button" data-v="overlay">Поверх видео</button><button class="chip" type="button" data-v="file">Отдельным файлом</button></div><span class="grow"></span><span class="lbl short">Угол</span><div class="cpos" id="cPos"><button type="button" data-v="tl" title="Слева сверху"></button><button type="button" data-v="tr" title="Справа сверху"></button><button type="button" data-v="bl" title="Слева снизу"></button><button type="button" data-v="br" title="Справа снизу"></button></div></div>
+      <label class="crow"><span class="lbl">Размер</span><input class="rg" type="range" id="cSize" min="50" max="200" step="5"><b id="cSizeV"></b></label>
+      <label class="crow"><span class="lbl">Высота</span><input class="rg" type="range" id="cHeight" min="15" max="100" step="5"><b id="cHeightV"></b></label>
+      <div class="crow"><span class="lbl">Фон</span><button class="switch" type="button" role="switch" aria-checked="true" id="cBg"><span class="tr"></span><span id="cBgT">Есть</span></button></div>
+      <label class="crow"><span class="lbl">Плотность фона</span><input class="rg" type="range" id="cOp" min="10" max="100" step="5"><b id="cOpV"></b></label>
+    </div>
+    <div class="cnote" id="cNote"></div>
+    <div class="foot"><button class="btn" id="cReset" type="button">Сбросить</button><button class="btn primary" id="cDone" type="button">Готово</button></div>
   </div>
 </div>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
@@ -2690,6 +2886,7 @@ const RULES = [
   [/^Не удалось получить ссылку на скачивание клипа (.+)\.$/, "Couldn’t get a download link for clip $1."], [/^Неожиданная ошибка: (.*)$/, "Unexpected error: $1"],
   [/^Слишком много запросов, подождите минуту\.$/, "Too many requests, please wait a minute."],
 ];
+Object.assign(EN, {"Чат на видео": "Chat on video", "Пример": "Example", "Как добавить": "How to add", "Поверх видео": "On the video", "Угол": "Corner", "Слева сверху": "Top left", "Справа сверху": "Top right", "Слева снизу": "Bottom left", "Справа снизу": "Bottom right", "Размер": "Size", "Высота": "Height", "Фон": "Background", "Есть": "On", "Плотность фона": "Background density", "Сбросить": "Reset", "Готово": "Done", "Настроить чат: размер, фон, положение": "Chat settings: size, background, position"});
 Object.assign(EN, {"Чат трансляции": "Stream chat", "Справа": "Right", "Слева": "Left", "Отдельным файлом": "Separate file", "Добавить к видео чат трансляции — каким он был в этот момент. Чат берётся из записи эфира.": "Add the stream chat to the video — as it was at that moment. The chat comes from the broadcast video."});
 Object.assign(EN, {"Эфир": "Live", "Записи": "Videos", "Клипы из": "Clips from the", "эфира": "stream", "Добавьте стримера — приложение будет держать в памяти последние минуты трансляции вместе со звуком, даже если там играет музыка. Случился момент — нажмите «Клип».": "Add a streamer — the app keeps the last minutes of the broadcast in memory with the sound, even when music is playing. When the moment happens, press “Clip”.", "Ник стримера или ссылка на канал": "Streamer name or channel link", "Следить за эфиром": "Watch the stream", "Держать в памяти": "Keep in memory", "2 мин": "2 min", "5 мин": "5 min", "10 мин": "10 min", "15 мин": "15 min", "Качество": "Quality", "Пока канал в списке, приложение смотрит эфир в фоне: трафик как при обычном просмотре, около 3 ГБ в час в 1080p. Рекламные вставки Twitch в клипы не попадают.": "While a channel is on the list, the app watches the stream in the background: traffic is like normal viewing, about 3 GB per hour in 1080p. Twitch ad breaks don’t end up in clips.", "Здесь появятся эфиры": "Streams will appear here", "Впишите стримера и нажмите «Следить за эфиром». Можно следить за четырьмя каналами сразу.": "Enter a streamer and press “Watch the stream”. You can watch four channels at once.", "трансляций": "of past streams", "Скачайте запись эфира целиком или вырежьте нужный кусок — даже у эфира, который ещё идёт. Видео качается прямо с Twitch.": "Download a whole broadcast or cut out the part you need — even from a stream that is still live. The video downloads straight from Twitch.", "Ник стримера или ссылка на запись (twitch.tv/videos/…)": "Streamer name or video link (twitch.tv/videos/…)", "Найти записи": "Find videos", "Показывать": "Show", "Трансляции": "Broadcasts", "Хайлайты": "Highlights", "Загруженные": "Uploads", "Здесь появятся записи": "Videos will appear here", "Впишите стримера — покажем его последние трансляции. Или вставьте ссылку на конкретную запись.": "Enter a streamer to see their recent broadcasts. Or paste a link to a specific video.", "Клип из эфира": "Live clip", "Начало клипа": "Clip start", "Конец клипа": "Clip end", "сейчас": "now", "Начало:": "Start:", "Конец:": "End:", "Длина клипа:": "Clip length:", "Отмена": "Cancel", "Сохранить клип": "Save clip", "Узнаю длину записи и доступные качества…": "Checking the video length and available qualities…", "Отрезок": "Range", "Целиком": "Whole", "Начало отрезка": "Range start", "Конец отрезка": "Range end", "Скачать": "Download"});
 function tr(s) {
@@ -3015,8 +3212,9 @@ async function openPlayer(r) {
   if (P.row !== r) return;
   if (res.error) { $("pMsg").textContent = res.error; return; }
   v.src = res.url; v.play().catch(() => {});
+  pChatSync();
 }
-function closePlayer() { const v = $("pv"); v.pause(); v.removeAttribute("src"); v.load(); hideVeil($("playVeil")); P.row = null; }
+function closePlayer() { PC.id = null; PC.state = ""; $("pChat").hidden = true; $("pChatMsg").hidden = true; const v = $("pv"); v.pause(); v.removeAttribute("src"); v.load(); hideVeil($("playVeil")); P.row = null; }
 $("pClose").addEventListener("click", closePlayer);
 $("playVeil").addEventListener("mousedown", (e) => { if (e.target === $("playVeil")) closePlayer(); });
 $("pv").addEventListener("loadedmetadata", () => {
@@ -3446,7 +3644,10 @@ function dlFill(node, it) {
   node.querySelector(".t .nm").title = it.title || "";
   node.querySelector(".t .st").textContent = it.state === "load" ? pct + "%" : (DL_LABEL[it.state] || "");
   const acts = node.querySelector(".dacts");
-  if (acts.dataset.s !== it.state) { acts.dataset.s = it.state; acts.innerHTML = dlActs(it); acts.classList.remove("swap"); void acts.offsetWidth; acts.classList.add("swap"); }
+  if (acts.dataset.s !== it.state) {
+    const first = !acts.dataset.s; acts.dataset.s = it.state; acts.innerHTML = dlActs(it);
+    if (!first) { acts.classList.remove("swap"); void acts.offsetWidth; acts.classList.add("swap"); clearTimeout(acts._t); acts._t = setTimeout(() => acts.classList.remove("swap"), 500); }
+  }
   const h = node.querySelector(".hatch");
   h.classList.toggle("done", it.state === "done"); h.classList.toggle("run", it.state === "load" || it.state === "wait");
   h.classList.toggle("stopped", it.state === "stop" || it.state === "fail");
@@ -3458,6 +3659,7 @@ function dlList(box, items, emptyHtml) {
   if (!items.length) { if (!box.querySelector(".dlempty")) box.innerHTML = `<div class="dlempty">${emptyHtml}</div>`; return; }
   box.querySelector(".dlempty")?.remove();
   const keep = new Set(items.map((it) => it.key));
+  let prev = null;
   box.querySelectorAll(".dl").forEach((n) => { if (!keep.has(n.dataset.k)) { n.classList.add("gone"); setTimeout(() => n.remove(), 260); n.dataset.k = ""; } });
   items.forEach((it) => {
     let n = [...box.children].find((x) => x.dataset.k === it.key);
@@ -3466,7 +3668,11 @@ function dlList(box, items, emptyHtml) {
       n.innerHTML = '<div class="t"><span class="nm"></span><span class="st"></span><span class="dacts"></span></div><div class="hatch"><i style="width:0"></i></div><div class="err" hidden></div>';
       n.addEventListener("animationend", () => n.classList.remove("enter"), { once: true });
     }
-    dlFill(n, it); box.appendChild(n);
+    dlFill(n, it);
+    let want = prev ? prev.nextSibling : box.firstChild;
+    while (want && want !== n && want.classList && want.classList.contains("gone")) want = want.nextSibling;
+    if (want !== n) box.insertBefore(n, want);
+    prev = n;
   });
 }
 ["railDl", "dlAll"].forEach((id) => $(id).addEventListener("click", (e) => {
@@ -4131,22 +4337,201 @@ $("vodList").addEventListener("click", (e) => {
   else openVod(v, b.dataset.a);
 });
 
-S.chat = { on: false, mode: "right" };
+const CHAT_DEF = { mode: "overlay", pos: "br", size: 100, height: 40, bg: true, opacity: 60 };
+S.chat = { on: false, style: { ...CHAT_DEF } };
+const CHAT_SLIDE = 0.28, ease3 = (x) => 1 - Math.pow(1 - Math.min(1, Math.max(0, x)), 3);
+function chatGeom(vw, vh, st) {
+  const fs = Math.max(10, Math.round(vh / 54 * st.size / 100));
+  const cw = Math.floor(Math.min(Math.floor(vw * 0.9), Math.round(fs * 16)) / 2) * 2;
+  const ch = Math.floor(Math.min(vh, Math.max(Math.round(fs * 4.5), Math.round(vh * st.height / 100))) / 2) * 2;
+  return { fs, cw, ch, m: Math.round(vh * 0.02) };
+}
+function chatRowHtml(k) {
+  return k.map((x) => x.img ? `<img class="${x.e ? "em" : "bd"}" src="${esc(x.img)}" alt="">` : `<${x.b ? "b" : "span"} style="color:${esc(x.c)}">${esc(x.tx)}</${x.b ? "b" : "span"}>`).join("");
+}
+class ChatView {
+  constructor(host) {
+    this.host = host; host.innerHTML = '<div class="cvb"><div class="cvbg"></div><div class="cvclip"></div></div>';
+    this.box = host.firstChild; this.bgEl = this.box.firstChild; this.clip = this.box.lastChild;
+    this.msgs = []; this.rows = new Map(); this.VW = 1920; this.VH = 1080; this.st = null;
+  }
+  setFrame(vw, vh) { if (vw !== this.VW || vh !== this.VH) { this.VW = vw; this.VH = vh; this.st && this.setStyle(this.st, true); } }
+  setStyle(st, force) {
+    const g = chatGeom(this.VW, this.VH, st), old = this.g;
+    this.st = { ...st }; this.g = g;
+    if (force || !old || old.fs !== g.fs || old.cw !== g.cw) { this.rows.forEach((r) => r.el.remove()); this.rows.clear(); }
+    const { fs, cw, ch, m } = g;
+    this.pad = Math.round(fs * 0.6); this.line = Math.round(fs * 1.45); this.ih = Math.round(fs * 1.3); this.gap = Math.max(2, Math.floor(fs / 5));
+    const top = st.pos === "tl" || st.pos === "tr", left = st.pos === "tl" || st.pos === "bl";
+    Object.assign(this.box.style, { width: cw + "px", height: ch + "px", left: (left ? m : this.VW - cw - m) + "px", top: (top ? m : this.VH - ch - m) + "px" });
+    this.host.style.width = this.VW + "px"; this.host.style.height = this.VH + "px";
+    const o = Math.max(2, Math.floor(fs / 9)), sh = [];
+    for (let a = 0; a < 16; a++) sh.push(`${(Math.cos(a / 8 * Math.PI) * o).toFixed(1)}px ${(Math.sin(a / 8 * Math.PI) * o).toFixed(1)}px 0 rgba(0,0,0,.92)`);
+    this.box.style.setProperty("--cvo", sh.join(","));
+    this.box.classList.toggle("nobg", !st.bg);
+    Object.assign(this.bgEl.style, { left: Math.round(this.pad * 0.5) + "px", right: Math.round(this.pad * 0.5) + "px", borderRadius: Math.max(4, Math.round(fs * 0.55)) + "px",
+      background: `rgba(8,12,34,${(st.opacity / 100).toFixed(2)})` });
+  }
+  fit(left, top, h) { this.host.style.transform = `translate(${left}px,${top}px) scale(${h / this.VH})`; }
+  setMessages(list) { this.rows.forEach((r) => r.el.remove()); this.rows.clear(); this.msgs = list || []; }
+  row(m) {
+    let r = this.rows.get(m);
+    if (r) return r;
+    const el = document.createElement("div"); el.className = "cvr";
+    Object.assign(el.style, { width: this.g.cw + "px", padding: `0 ${this.pad}px`, fontSize: this.g.fs + "px", lineHeight: this.line + "px" });
+    el.innerHTML = chatRowHtml(m.k);
+    el.querySelectorAll("img").forEach((im) => {
+      const em = im.classList.contains("em"), hh = em ? this.ih : this.g.fs;
+      Object.assign(im.style, { height: hh + "px", marginRight: Math.max(2, Math.floor(this.g.fs / 8)) + "px", top: "-" + Math.round(this.g.fs * 0.08) + "px" });
+      im.addEventListener("error", () => { im.remove(); r.h = 0; });
+      im.addEventListener("load", () => { r.h = 0; });
+    });
+    this.clip.appendChild(el);
+    r = { el, h: 0, on: true }; this.rows.set(m, r);
+    return r;
+  }
+  height(r) { if (!r.h) { if (!r.el.isConnected) this.clip.appendChild(r.el); r.h = Math.max(this.line, r.el.offsetHeight); } return r.h; }
+  render(t) {
+    if (!this.st) return;
+    const ms = this.msgs, avail = this.g.ch - this.pad * 2, half = Math.round(this.pad * 0.5);
+    let lo = 0, hi = ms.length; while (lo < hi) { const md = (lo + hi) >> 1; if (ms[md].t <= t) lo = md + 1; else hi = md; }
+    const vis = [], fades = new Map(); let used = 0, disp = 0;
+    for (let i = lo - 1; i >= 0; i--) {
+      const r = this.row(ms[i]), hh = this.height(r) + this.gap, age = t - ms[i].t;
+      if (age < CHAT_SLIDE) { const p = ease3(age / CHAT_SLIDE); disp += hh * (1 - p); fades.set(r, p); }
+      vis.push(r); used += hh;
+      if (used - disp > avail + this.line * 2 || vis.length > 80) break;
+    }
+    const shown = used - disp, topMode = this.st.pos === "tl" || this.st.pos === "tr";
+    let bottom, bgBot, bgTop;
+    if (topMode && shown <= avail) { bottom = this.pad + used; bgBot = this.pad + shown + half; bgTop = half; }
+    else { bottom = this.g.ch - this.pad + disp; bgBot = this.g.ch - half; bgTop = Math.max(half, bottom - used - half); }
+    const showBg = vis.length && this.st.bg && this.st.opacity > 0 && bgBot - bgTop > this.g.fs * 0.8;
+    this.bgEl.style.display = showBg ? "" : "none";
+    if (showBg) { this.bgEl.style.top = bgTop + "px"; this.bgEl.style.height = (bgBot - bgTop) + "px"; }
+    this.clip.style.height = (this.st.bg ? bgBot : this.g.ch) + "px";
+    const z = Math.max(4, Math.round(this.g.fs * 1.6)), mask = used - disp > avail - 1 ? `linear-gradient(to bottom, transparent 0, #000 ${z}px)` : "none";
+    this.clip.style.webkitMaskImage = mask; this.clip.style.maskImage = mask;
+    const keep = new Set(vis);
+    let y = bottom;
+    for (const r of vis) {
+      y -= r.h + this.gap;
+      if (!r.el.isConnected) this.clip.appendChild(r.el);
+      r.el.style.transform = `translateY(${(y + this.gap).toFixed(1)}px)`;
+      r.el.style.opacity = fades.has(r) ? fades.get(r).toFixed(3) : "1";
+    }
+    this.rows.forEach((r, m) => { if (!keep.has(r) && r.el.isConnected) r.el.remove(); });
+    if (this.rows.size > 400) { const live = new Set(ms.slice(Math.max(0, lo - 150), lo)); this.rows.forEach((r, m) => { if (!live.has(m)) this.rows.delete(m); }); }
+  }
+}
+const DEMO_N = [["kukanty", "#ff4d4d"], ["akuryyyyyy", "#ff7f50"], ["dragaspekt", "#daa520"], ["hoodrixh__", "#ff69b4"], ["torfo127", "#1e90ff"], ["aguer0k", "#9acd32"], ["danger_worker", "#4d7bff"],
+  ["slipiik", "#ff4d4d"], ["kotik234_", "#ff6aa2"], ["moonydorii", "#00e5c0"], ["gleb3489", "#3ddc97"], ["Webbrom_2102", "#8a2be2"]];
+const DEMO_T = () => RU ? ["1", "где леха", "урааа", "Hi", "куууу", "это было сильно 😂", "LUL", "ахахах ну ты даёшь", "го дальше", "стример топ 🔥", "давай ещё раз", "2", "ааааа что", "лучший момент"]
+  : ["1", "where is Alex", "letsgo", "Hi", "LUL", "that was insane 😂", "W", "hahaha no way", "keep going", "best streamer 🔥", "again again", "2", "wait what", "clip it"];
+const DEMO_GAPS = [0.35, 0.9, 0.2, 1.4, 0.6, 0.25, 1.1, 0.5, 2.0, 0.3, 0.8];
+const CP = { view: null, raf: 0, t0: 0, next: 0, j: 0 };
+function demoMsg(j, t) { const [n, c] = DEMO_N[(j * 7) % DEMO_N.length], tx = DEMO_T(); return { t, k: [{ tx: n, b: true, c }, { tx: ": ", b: false, c: "#ebeeff" }, { tx: tx[(j * 5) % tx.length], b: false, c: "#ebeeff" }] }; }
+function cpTick() {
+  if (!isOpen($("chatVeil"))) { CP.raf = 0; return; }
+  const t = (performance.now() - CP.t0) / 1000, v = CP.view;
+  while (CP.next <= t + 0.001) { v.msgs.push(demoMsg(CP.j, CP.next)); CP.next += DEMO_GAPS[CP.j++ % DEMO_GAPS.length]; }
+  if (v.msgs.length > 70) { v.msgs.splice(0, v.msgs.length - 50).forEach((m) => { const r = v.rows.get(m); if (r) { r.el.remove(); v.rows.delete(m); } }); }
+  const box = $("cPrev"), w = box.clientWidth, h = box.clientHeight;
+  v.fit(0, 0, h || 1); v.render(t);
+  CP.raf = requestAnimationFrame(cpTick);
+}
+function chatSummary(st) {
+  const pos = { tl: t2("слева сверху", "top left"), tr: t2("справа сверху", "top right"), bl: t2("слева снизу", "bottom left"), br: t2("справа снизу", "bottom right") }[st.pos];
+  const where = st.mode === "file" ? t2("отдельным файлом", "separate file") : pos;
+  return `<b>${esc(where[0].toUpperCase() + where.slice(1))}</b> · ${st.size}% · ${esc(st.bg ? t2("с фоном", "background") : t2("без фона", "no background"))}`;
+}
 function paintChat() {
   document.querySelectorAll("[data-chatopt]").forEach((b) => {
     b.querySelector("[data-chaton]").setAttribute("aria-checked", String(!!S.chat.on));
-    b.querySelector("[data-cmodes]").hidden = !S.chat.on;
-    b.querySelectorAll("[data-cm]").forEach((c) => c.classList.toggle("on", c.dataset.cm === S.chat.mode));
+    const cs = b.querySelector("[data-chatset]"); cs.hidden = !S.chat.on; cs.querySelector(".cs-t").innerHTML = chatSummary(S.chat.style);
   });
   if (VD.info) vdPaint();
+  pChatSync();
 }
-const chatParam = () => (S.chat.on ? S.chat.mode : null);
+function paintChatDlg() {
+  const st = S.chat.style;
+  document.querySelectorAll("#cMode .chip").forEach((c) => c.classList.toggle("on", c.dataset.v === st.mode));
+  document.querySelectorAll("#cPos button").forEach((c) => c.classList.toggle("on", c.dataset.v === st.pos));
+  [["cSize", "size", "%"], ["cHeight", "height", "%"], ["cOp", "opacity", "%"]].forEach(([id, k, u]) => {
+    const el = $(id); if (document.activeElement !== el || +el.value !== st[k]) el.value = st[k];
+    el.style.setProperty("--p", ((st[k] - el.min) / (el.max - el.min) * 100) + "%"); $(id + "V").textContent = st[k] + u;
+  });
+  $("cBg").setAttribute("aria-checked", String(st.bg)); $("cBgT").textContent = st.bg ? t2("Есть", "On") : t2("Нет — текст с обводкой", "Off — outlined text");
+  $("cOp").disabled = !st.bg;
+  $("cNote").textContent = st.mode === "file"
+    ? t2("Чат сохранится отдельным видео с прозрачным фоном (.mov) — его можно положить поверх видео в монтажке и подвинуть куда угодно.", "The chat is saved as a separate video with a transparent background (.mov) — place it over the video in your editor wherever you like.")
+    : t2("Сообщения появляются в том же порядке и темпе, что и в чате трансляции, и плавно поднимаются вверх.", "Messages appear in the same order and pace as in the stream chat and smoothly scroll up.");
+  if (CP.view) CP.view.setStyle(st);
+}
+let chatSaveT = 0;
+function setChatStyle(patch) {
+  S.chat.style = { ...S.chat.style, ...patch }; paintChatDlg(); paintChat();
+  clearTimeout(chatSaveT); chatSaveT = setTimeout(() => api("/api/settings", { chat_style: S.chat.style }).catch(() => {}), 350);
+}
+function openChatSettings() {
+  const th = (isOpen($("playVeil")) && P.row && P.row.thumb) || (isOpen($("vodVeil")) && VD.cur && VD.cur.thumb) || "";
+  const img = $("cPrevImg"); if (th) { img.src = th; img.hidden = false; } else { img.removeAttribute("src"); img.hidden = true; }
+  showVeil($("chatVeil"));
+  if (!CP.view) CP.view = new ChatView($("cHost"));
+  CP.view.setFrame(1920, 1080); CP.view.setMessages([]); CP.t0 = performance.now(); CP.j = 0; CP.next = -6;
+  paintChatDlg();
+  if (!CP.raf) CP.raf = requestAnimationFrame(cpTick);
+}
+const closeChatSettings = () => hideVeil($("chatVeil"));
+$("chClose").addEventListener("click", closeChatSettings); $("cDone").addEventListener("click", closeChatSettings);
+$("chatVeil").addEventListener("mousedown", (e) => { if (e.target === $("chatVeil")) closeChatSettings(); });
+$("cReset").addEventListener("click", () => setChatStyle({ ...CHAT_DEF }));
+$("cMode").addEventListener("click", (e) => { const c = e.target.closest(".chip"); if (c) setChatStyle({ mode: c.dataset.v }); });
+$("cPos").addEventListener("click", (e) => { const c = e.target.closest("button"); if (c) setChatStyle({ pos: c.dataset.v }); });
+[["cSize", "size"], ["cHeight", "height"], ["cOp", "opacity"]].forEach(([id, k]) => $(id).addEventListener("input", () => setChatStyle({ [k]: +$(id).value })));
+$("cBg").addEventListener("click", () => setChatStyle({ bg: !S.chat.style.bg }));
+addEventListener("keydown", (e) => { if (e.key === "Escape" && isOpen($("chatVeil"))) { closeChatSettings(); e.preventDefault(); e.stopPropagation(); } }, true);
+const chatParam = () => (S.chat.on ? { ...S.chat.style } : null);
 document.addEventListener("click", (e) => {
-  const sw = e.target.closest("[data-chaton]"), cm = e.target.closest("[data-cm]");
-  if (sw) S.chat.on = !S.chat.on; else if (cm) S.chat.mode = cm.dataset.cm; else return;
-  paintChat(); api("/api/settings", { chat_on: S.chat.on, chat_mode: S.chat.mode }).catch(() => {});
-  if (sw && S.chat.on) toast(t2("Чат будет добавляться к скачанным видео", "Chat will be added to downloaded videos"));
+  const sw = e.target.closest("[data-chaton]"), cs = e.target.closest("[data-chatset]");
+  if (cs) { openChatSettings(); return; }
+  if (!sw) return;
+  S.chat.on = !S.chat.on;
+  paintChat(); api("/api/settings", { chat_on: S.chat.on }).catch(() => {});
+  if (S.chat.on) toast(t2("Чат будет добавляться к скачанным видео. Размер и фон — в настройках рядом.", "Chat will be added to downloaded videos. Size and background are in the settings next to it."));
 });
+const PC = { view: null, id: null, state: "", raf: 0 };
+function pChatSync() {
+  const open = P.row && isOpen($("playVeil")), on = open && S.chat.on;
+  $("pChat").hidden = !on || PC.state !== "ok";
+  const msg = $("pChatMsg");
+  if (!on) { msg.hidden = true; return; }
+  if (!PC.view) PC.view = new ChatView($("pChat"));
+  PC.view.setStyle(S.chat.style);
+  if (PC.id !== P.row.id) {
+    PC.id = P.row.id; PC.state = "load"; PC.view.setMessages([]);
+    const id = P.row.id;
+    api("/api/chat/clip", { id }).then((r) => {
+      if (PC.id !== id) return;
+      if (r.error) { PC.state = "err"; PC.note = r.error; }
+      else { PC.view.setMessages(r.messages || []); PC.state = (r.messages || []).length ? "ok" : "err"; PC.note = r.note || ""; }
+      pChatSync();
+    }).catch(() => { if (PC.id === id) { PC.state = "err"; PC.note = t2("Не удалось загрузить чат", "Couldn't load the chat"); pChatSync(); } });
+  }
+  msg.hidden = PC.state === "ok";
+  msg.textContent = PC.state === "load" ? t2("Загружаю чат…", "Loading chat…") : (PC.note || "");
+  if (PC.state === "ok" && !PC.raf) PC.raf = requestAnimationFrame(pChatTick);
+}
+function pChatTick() {
+  if (!(P.row && isOpen($("playVeil")) && S.chat.on && PC.state === "ok")) { PC.raf = 0; return; }
+  const v = $("pv"), box = v.parentElement, bw = box.clientWidth, bh = box.clientHeight;
+  const vw = v.videoWidth || 1920, vh = v.videoHeight || 1080, sc = Math.min(bw / vw, bh / vh);
+  const dw = vw * sc, dh = vh * sc;
+  PC.view.setFrame(Math.round(1080 * vw / vh), 1080);
+  PC.view.fit((bw - dw) / 2, (bh - dh) / 2, dh);
+  PC.view.render(v.currentTime || 0);
+  PC.raf = requestAnimationFrame(pChatTick);
+}
 function vdPaint() {
   const info = VD.info; if (!info) return;
   const full = VD.mode === "full";
@@ -4161,7 +4546,7 @@ function vdPaint() {
   if (!full && len <= 20 * 60) notes.push(t2("Отрезок обрежется точно до секунды.", "The range is cut to the exact second."));
   else if (!full) notes.push(t2("Длинный отрезок скачается без перекодирования: границы — с точностью до ~10 секунд.", "A long range downloads without re-encoding: edges are accurate to ~10 seconds."));
   if (info.recording) notes.push(t2("Эфир ещё идёт — в записи пока ", "The stream is still live — the video currently has ") + clock(info.length) + ".");
-  if (S.chat.on && VD.quality !== "audio") notes.push(S.chat.mode === "file" ? t2("Чат сохранится отдельным видео с прозрачным фоном (.mov) — его удобно положить поверх в монтажке.", "The chat is saved as a separate video with a transparent background (.mov) — handy to place on top in your editor.")
+  if (S.chat.on && VD.quality !== "audio") notes.push(S.chat.style.mode === "file" ? t2("Чат сохранится отдельным видео с прозрачным фоном (.mov) — его удобно положить поверх в монтажке.", "The chat is saved as a separate video with a transparent background (.mov) — handy to place on top in your editor.")
     : t2("Чат наложится на видео, поэтому видео перекодируется — это займёт больше времени.", "The chat is drawn onto the video, so it gets re-encoded — this takes longer."));
   const mut = (info.muted || []).filter(([o, d]) => o < b && o + d > a);
   if (mut.length) notes.push(`<span class="w">${esc(t2("В этом отрезке Twitch заглушил звук: ", "Twitch muted the audio in this range: "))}${mut.map(([o, d]) => clock(o) + "–" + clock(o + d)).join(", ")}</span>`);
@@ -4233,7 +4618,7 @@ addEventListener("keydown", (e) => {
   requestAnimationFrame(() => requestAnimationFrame(() => document.body.classList.remove("noanim")));
   const st = await api("/api/state");
   S.quality = st.quality || "1080"; paintQuality();
-  if (st.chat) { S.chat = st.chat; paintChat(); }
+  if (st.chat) { S.chat = { on: !!st.chat.on, style: { ...CHAT_DEF, ...(st.chat.style || {}) } }; paintChat(); }
   S.dir = st.downloadDir; S.history = st.history || {}; S.updateSeen = st.updateSeen || ""; paintDir(); checkLink();
   const l = st.last || {};
   setLogins(l.login || ""); $("words").value = l.words || "";
@@ -4415,7 +4800,7 @@ class DownloadQueue:
                     path, note = download_vod(src, folder, progress=prog, cancel=ev)
                     it["note"] = note
                 else:
-                    chat = src.get("chat") if src.get("chat") in CHAT_MODES else None
+                    chat = chat_style(src.get("chat"))
                     p1 = (lambda p, it=it: it.__setitem__("pct", p * 40 // 100)) if chat else prog
                     path = download_clip({"id": src["id"], "title": src["title"], "broadcaster": src["broadcaster"]}, folder,
                                          progress=p1, cancel=ev, start=src["start"], end=src["end"], quality=it["quality"])
@@ -4688,7 +5073,7 @@ def make_handler(ctx):
                     "history": cfg.get("history", {}),
                     "updateSeen": cfg.get("update_seen", ""),
                     "quality": cfg.get("quality", "1080"),
-                    "chat": {"on": bool(cfg.get("chat_on")), "mode": cfg.get("chat_mode") if cfg.get("chat_mode") in CHAT_MODES else "right"},
+                    "chat": {"on": bool(cfg.get("chat_on")), "style": chat_style(cfg.get("chat_style") or cfg.get("chat_mode") or "overlay")},
                     "lang": LANG["code"],
                 })
             if u.path == "/api/job":
@@ -4732,8 +5117,8 @@ def make_handler(ctx):
                     ctx.cfg["lang"] = LANG["code"] = b["lang"]
                 if "chat_on" in b:
                     ctx.cfg["chat_on"] = bool(b["chat_on"])
-                if b.get("chat_mode") in CHAT_MODES:
-                    ctx.cfg["chat_mode"] = b["chat_mode"]
+                if isinstance(b.get("chat_style"), dict):
+                    ctx.cfg["chat_style"] = chat_style(b["chat_style"])
                 save_config(ctx.cfg)
                 return {"ok": True, "downloadDir": ctx.download_dir()}
             if path == "/api/categories":
@@ -4759,7 +5144,7 @@ def make_handler(ctx):
             if path == "/api/download/clear":
                 ctx.dlq.clear()
                 return {"items": ctx.dlq.view()}
-            if path.startswith("/api/vod"):
+            if path.startswith("/api/vod") or path == "/api/chat/clip":
                 return self.live_route(path, b)
             if path == "/api/clipurl":
                 cid = str(b.get("id", ""))
@@ -4855,6 +5240,19 @@ def make_handler(ctx):
                     v["recording"] = bool(sid) and v["streamId"] == sid
                 return {"user": {"login": u["login"], "name": u.get("display_name") or u["login"], "avatar": u.get("profile_image_url") or ""},
                         "items": items, "after": (d.get("pagination") or {}).get("cursor") or ""}
+            if path == "/api/chat/clip":
+                slug = re.sub(r"[^A-Za-z0-9_-]", "", str(b.get("id") or ""))[:120]
+                if not slug:
+                    raise ValueError(L("Неверный клип.", "Invalid clip."))
+                cs = clip_source(slug)
+                if not cs.get("video") or cs.get("offset") is None:
+                    return {"messages": [], "note": L("Запись трансляции удалена — чата для этого клипа нет.", "The broadcast video was deleted — this clip has no chat.")}
+                off = float(cs["offset"])
+                dur = float(cs.get("duration") or 60)
+                msgs = fetch_chat(cs["video"], max(0.0, off - 30), off + dur + 1)
+                assets = ChatAssets.get(cs.get("channel") or "")
+                out = [{"t": round(m["t"] - off, 2), "k": assets.json_tokens(m)} for m in msgs[-1500:]]
+                return {"messages": out, "note": "" if out else L("В чате в этот момент не было сообщений.", "There were no chat messages at that moment.")}
             if path == "/api/vod/info":
                 vid = parse_vod_id(b.get("id"))
                 if not vid:
@@ -4884,7 +5282,7 @@ def make_handler(ctx):
                     raise ValueError(L("Конец отрезка должен быть позже начала.", "The end must be after the start."))
                 title = str(b.get("title") or "VOD")[:120]
                 part = f" ({clock(st or 0)}–{clock(en) if en is not None else L('конец', 'end')})" if (st is not None or en is not None) else ""
-                chat = b.get("chat") if b.get("chat") in CHAT_MODES else None
+                chat = chat_style(b.get("chat"))
                 key = ctx.dlq.add_task("vod", L("Запись: ", "Video: ") + title + part + (L(" + чат", " + chat") if chat else ""),
                                        {"id": vid, "title": title, "login": str(b.get("login") or ""), "start": st, "end": en, "quality": q,
                                         "chat": chat, "userId": re.sub(r"\D", "", str(b.get("userId") or ""))})
@@ -4963,7 +5361,7 @@ def make_handler(ctx):
             quality = str(b.get("quality") or ctx.cfg.get("quality") or "1080")
             if quality not in QUALITIES:
                 quality = "1080"
-            chat = b.get("chat") if b.get("chat") in CHAT_MODES else None
+            chat = chat_style(b.get("chat"))
             return {"keys": ctx.dlq.add(items, quality, chat)}
 
     return Handler
@@ -5121,8 +5519,11 @@ def main():
         return 0
     if "--selftest-chat" in sys.argv:
         msgs = [{"t": i * 0.5, "name": f"viewer{i}", "login": f"viewer{i}", "color": "", "badges": [], "frags": [("Привет чат 😂 KEKW", None)]} for i in range(20)]
-        r = ChatRenderer(msgs, 400, 720, "")
+        fs, cw, ch, _ = chat_geom(1920, 1080, CHAT_DEFAULT)
+        r = ChatRenderer(msgs, cw, ch, "", fs=fs)
         n = sum(1 for _ in r.frames(5, 2))
+        r2 = ChatRenderer(msgs, cw, ch, "", fs=fs, bg=False, top=True)
+        n += sum(1 for _ in r2.frames(5, 2))
         print("CHAT OK", n, find_fonts())
         return 0
     if "--nettest" in sys.argv:
