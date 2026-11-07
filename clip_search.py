@@ -387,14 +387,14 @@ class ClipCache:
             clips, used = {}, None
             if lo is None:
                 for e in sorted(ents, key=lambda e: -e["t"]):
-                    if e["lo"] is None and (e["full"] or e["n"] >= budget):
+                    if e["lo"] is None and (e["full"] or e.get("b", e["n"]) >= budget):
                         for c in e["clips"]:
                             clips.setdefault(c["id"], c)
                         return list(clips.values()), [], e["t"]
                 return [], [(None, None)], None
             a, b = lo.timestamp(), hi.timestamp()
             tol = min(CACHE_TTL, max(3600, (b - a) * 0.02))
-            near = [e for e in ents if not e["full"] and e["lo"] is not None and abs(e["lo"] - a) <= tol and abs(e["hi"] - b) <= tol and e["n"] >= budget]
+            near = [e for e in ents if not e["full"] and e["lo"] is not None and abs(e["lo"] - a) <= tol and abs(e["hi"] - b) <= tol and e.get("b", e["n"]) >= budget]
             if near:
                 e = max(near, key=lambda e: e["t"])
                 return [c for c in e["clips"]], [], e["t"]
@@ -419,10 +419,10 @@ class ClipCache:
             out = [datetime.fromtimestamp(x, timezone.utc) for g in gaps for x in g]
             return [{k: v for k, v in c.items() if k != "_t"} for c in clips.values()], [(out[i], out[i + 1]) for i in range(0, len(out), 2)], used
 
-    def store(self, key, lo, hi, clips, full):
+    def store(self, key, lo, hi, clips, full, budget=0):
         with self.lock:
             self._load()
-            ent = {"lo": lo.timestamp() if lo else None, "hi": hi.timestamp() if hi else None, "t": time.time(), "full": bool(full), "n": len(clips),
+            ent = {"lo": lo.timestamp() if lo else None, "hi": hi.timestamp() if hi else None, "t": time.time(), "full": bool(full), "n": len(clips), "b": int(budget or len(clips)),
                    "clips": [{k: c.get(k) for k in CLIP_KEEP} for c in clips]}
             def covered(e):
                 if e["lo"] == ent["lo"] and e["hi"] == ent["hi"]:
@@ -767,7 +767,7 @@ def search_clips(tw, login="", game_id="", words="", start=None, end=None, creat
                     if cursor and not deep:
                         truncated = True
                 if got or full:
-                    CACHE.store(ckey, slo, shi, got, full)
+                    CACHE.store(ckey, slo, shi, got, full, taken)
                 if len(found) >= MAX_RESULTS:
                     break
             if len(found) >= MAX_RESULTS:
