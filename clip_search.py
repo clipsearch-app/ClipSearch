@@ -46,8 +46,7 @@ def L(ru, en):
     return en if LANG["code"] == "en" else ru
 
 
-RELEASE_NOTES = """- Сортировка в несколько уровней: например, по дням, а внутри каждого дня — по просмотрам. Клипы делятся на группы с заголовками, выбор запоминается.
-- Значок «Скачан» на клипах, которые уже есть в папке загрузок: нажмите — откроется файл. Кнопка «Скрыть скачанные» убирает их из списка.
+RELEASE_NOTES = """- Значок «Скачан» на клипах, которые уже есть в папке загрузок: нажмите — откроется файл. Кнопка «Скрыть скачанные» убирает их из списка.
 - Значок CC на клипах с субтитрами.
 - Повторный поиск за 12 часов берётся из сохранённого и открывается почти мгновенно. Кнопка «Обновить» спрашивает Twitch заново.
 - Новое окно «Настройки»: папка, качество, сколько клипов качать одновременно (до 4), шаблон имени файла, звук по окончании загрузок, период и глубокий поиск по умолчанию, язык.
@@ -57,7 +56,6 @@ RELEASE_NOTES = """- Сортировка в несколько уровней: 
 - Поиск клипов работает в сетях, где провайдер замедляет зарубежные сайты: раньше там поиск долго грузился и заканчивался ошибкой «The read operation timed out».
 
 <!-- en -->
-- Multi-level sorting: for example, by day, and within each day by views. Clips are split into groups with headers, and your choice is remembered.
 - A “Downloaded” badge on clips that are already in your download folder: click it to open the file. “Hide downloaded” removes them from the list.
 - A CC badge on clips with captions.
 - Repeating a search within 12 hours uses saved results and opens almost instantly. “Refresh” asks Twitch again.
@@ -2913,24 +2911,10 @@ button.brand { border: 0; background: none; color: inherit; font: inherit; curso
 .brand:hover b, .brand:focus-visible b { text-shadow: 0 0 14px rgba(140, 164, 255, 0.85), 0 0 30px rgba(122, 99, 255, 0.45); }
 .brand:active img { transform: scale(.95); transition-duration: .12s; }
 
-.sorts .thenp, .sorts .addl, .gseg .chip { height: 32px; padding: 0 12px; font-size: 13px; }
-.sorts .then-l { color: var(--muted); font-size: 13px; align-self: center; margin: 0 0 0 6px; }
-.sorts .thenp { display: inline-flex; align-items: center; gap: 5px; }
-.sorts .thenp .i { width: 14px; height: 14px; opacity: .65; }
-.sorts .addl { border-style: dashed; color: var(--muted); background: transparent; }
-.sorts .addl:hover { color: var(--text); }
 .sorts .hidedl { height: 32px; font-size: 13px; margin-left: 8px; gap: 8px; }
 .sorts .hidedl .tr { width: 34px; height: 20px; }
 .sorts .hidedl .tr::after { width: 14px; height: 14px; }
 .sorts .hidedl[aria-checked="true"] .tr::after { left: 16px; }
-.gseg { flex: 1 1 100%; order: 4; gap: 6px; margin-top: -2px; }
-.gseg .lbl { font-size: 13px; }
-.gseg[hidden] { display: none; }
-.ghead { display: flex; align-items: center; gap: 9px; margin: 14px 4px 0; font-size: 13px; color: var(--muted); animation: fadeIn .35s ease both; }
-.ghead:first-child { margin-top: 0; }
-.ghead b { color: var(--text); font-weight: 500; font-size: 15px; }
-.ghead b::first-letter { text-transform: uppercase; }
-.ghead::after { content: ""; flex: 1; height: 1px; background: linear-gradient(90deg, var(--line-strong), transparent); }
 .thumb .bdg, .vd .vth .bdg { position: absolute; left: 7px; bottom: 7px; z-index: 3; display: flex; gap: 5px; align-items: center; pointer-events: none; }
 .bdg > * { pointer-events: auto; }
 .ccb { background: rgba(5, 8, 24, 0.82); color: #dfe5ff; font-size: 10.5px; font-weight: 700; letter-spacing: .06em; padding: 2px 6px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.22); animation: fadeIn .3s ease both; }
@@ -3106,10 +3090,8 @@ button.brand { border: 0; background: none; color: inherit; font: inherit; curso
                 <button class="chip" data-s="date">Дата</button>
                 <button class="chip" data-s="dur">Длительность</button>
                 <button class="chip" data-s="title">Название</button>
-                <span id="sortThen" style="display:contents"></span>
                 <button class="switch hidedl" id="hideDl" type="button" role="switch" aria-checked="false" hidden><span class="tr"></span><span id="hideDlT">Скрыть скачанные</span></button>
               </div>
-              <div class="seg solid gseg" id="gSeg" hidden><span class="lbl">Группы</span><button class="chip" type="button" data-g="exact">Нет</button><button class="chip" type="button" data-g="hour">По часам</button><button class="chip" type="button" data-g="day">По дням</button><button class="chip" type="button" data-g="week">По неделям</button></div>
             </div>
             <div class="list" id="list"><div class="empty" id="firstEmpty"><div class="big"><svg class="i" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg></div><h3>Здесь появятся клипы</h3><p>Впишите стримера или категорию, выберите период и нажмите «Искать». Дату можно задать точно: с 01.02.2024 по 03.02.2026.</p></div></div>
             <button class="btn more" id="more" hidden>Показать ещё</button>
@@ -3596,7 +3578,7 @@ function plural(n, f) { const a = n % 100, b = a % 10; return a > 10 && a < 20 ?
 
 const S = {
   period: { kind: "preset", key: "7d" },
-  rows: [], all: [], byId: new Map(), gen: 0, shown: 0, sorts: [{ k: "views", d: -1, g: "exact" }], hideDone: false,
+  rows: [], all: [], byId: new Map(), gen: 0, shown: 0, sort: { key: "views", desc: true }, hideDone: false,
   prefs: { soundDone: true, autoUpdate: true, deepDefault: false, periodDefault: "last", parallel: 1, nameTpl: "{streamer} - {title}" },
   selected: new Set(), catId: "", catName: "",
   job: null, downloads: new Map(), dlJob: null, link: null, dir: "",
@@ -4018,7 +4000,7 @@ function done(res) {
   if (res.info.cc_unknown) st += ` У ${res.info.cc_unknown.toLocaleString(LOC)} клипов Twitch не ответил про субтитры — они не показаны.`;
   $("resStatus").textContent = st;
   paintCached(res.info);
-  sortRows(); S.shown = 0; $("list").innerHTML = ""; renderMore(); drawChart(); paintSorts();
+  sortRows(); S.shown = 0; $("list").innerHTML = ""; renderMore(); drawChart(); moveGlide($("sorts"));
   refreshDone(true);
   if (!n) $("list").innerHTML = `<div class="empty"><div class="big"><svg class="i" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5M8.5 11h5"/></svg></div><h3>Ничего не нашлось</h3><p>Расширьте период, уберите часть слов или включите глубокий поиск.</p></div>`;
 }
@@ -4042,72 +4024,21 @@ function loadPeriod(p) {
   else if (p.kind === "last") S.period = p;
 }
 
-const SORT_N = { views: tt("Просмотры", "Views"), date: tt("Дата", "Date"), dur: tt("Длительность", "Duration"), title: tt("Название", "Title") };
-const G_N = { hour: tt("По часам", "By hour"), day: tt("По дням", "By day"), week: tt("По неделям", "By week") };
-const SORT_DIR = {
-  views: [tt("Сначала больше просмотров", "Most views first"), tt("Сначала меньше просмотров", "Fewest views first")],
-  date: [tt("Сначала новые", "Newest first"), tt("Сначала старые", "Oldest first")],
-  dur: [tt("Сначала длинные", "Longest first"), tt("Сначала короткие", "Shortest first")],
-  title: [tt("От Я до А", "Z to A"), tt("От А до Я", "A to Z")],
-};
-const CARET = '<svg class="i" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>';
-function gStart(ts, g) {
-  const d = new Date(ts);
-  if (g === "hour") { d.setMinutes(0, 0, 0); return d.getTime(); }
-  d.setHours(0, 0, 0, 0);
-  if (g === "week") d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
-  return d.getTime();
-}
-function grouping() { const l = S.sorts[0]; return l && l.k === "date" && l.g && l.g !== "exact" ? l.g : null; }
-function sortVal(r, l) {
-  if (l.k === "date") return l.g && l.g !== "exact" ? gStart(r.ts, l.g) : r.ts.getTime();
-  if (l.k === "views") return r.views;
-  if (l.k === "dur") return r.duration;
-  return r.title.toLowerCase();
-}
 function sortRows() {
-  const lv = S.sorts, g = grouping();
-  S.rows.forEach((r) => { r._gk = g ? gStart(r.ts, g) : null; });
-  S.rows.sort((a, b) => {
-    for (const l of lv) {
-      const x = sortVal(a, l), y = sortVal(b, l);
-      if (x !== y) { const c = l.k === "title" ? String(x).localeCompare(String(y), LOC) : (x < y ? -1 : 1); if (c) return c * l.d; }
-    }
-    return b.ts - a.ts || (a.id < b.id ? -1 : 1);
-  });
-  S.gcount = new Map();
-  if (g) S.rows.forEach((r) => S.gcount.set(r._gk, (S.gcount.get(r._gk) || 0) + 1));
+  const { key, desc } = S.sort, k = { views: (r) => r.views, date: (r) => r.ts, dur: (r) => r.duration, title: (r) => r.title.toLowerCase() }[key];
+  S.rows.sort((a, b) => (k(a) < k(b) ? -1 : k(a) > k(b) ? 1 : 0) * (desc ? -1 : 1));
 }
-function gLabel(k, g) {
-  const d = new Date(k), y = d.getFullYear() !== new Date().getFullYear() ? "numeric" : undefined;
-  const hm = (x) => x.toLocaleTimeString(LOC, { hour: "2-digit", minute: "2-digit" });
-  if (g === "hour") return d.toLocaleDateString(LOC, { day: "numeric", month: "long", year: y }) + ", " + hm(d) + "–" + hm(new Date(k + 3600e3));
-  if (g === "week") { const e = new Date(k); e.setDate(e.getDate() + 6); return d.toLocaleDateString(LOC, { day: "numeric", month: "short" }) + " – " + e.toLocaleDateString(LOC, { day: "numeric", month: "short", year: y }); }
-  return d.toLocaleDateString(LOC, { weekday: "long", day: "numeric", month: "long", year: y });
-}
-function ghead(k, g) {
-  const n = S.gcount.get(k) || 0, el = document.createElement("div"); el.className = "ghead";
-  el.innerHTML = `<b>${esc(gLabel(k, g))}</b><span>· ${n.toLocaleString(LOC)} ${esc(tt(plural(n, ["клип", "клипа", "клипов"]), n === 1 ? "clip" : "clips"))}</span>`;
-  return el;
-}
-function paintSorts() {
-  const l0 = S.sorts[0];
-  document.querySelectorAll("#sorts .chip[data-s]").forEach((x) => {
-    const on = x.dataset.s === l0.k;
-    x.classList.toggle("on", on);
-    x.textContent = (on && l0.k === "date" && G_N[l0.g] ? G_N[l0.g] : SORT_N[x.dataset.s]) + (on ? (l0.d < 0 ? " ↓" : " ↑") : "");
-  });
-  const gs = $("gSeg"); gs.hidden = l0.k !== "date";
-  gs.querySelectorAll(".chip").forEach((c) => c.classList.toggle("on", c.dataset.g === (l0.g || "exact")));
-  const used = new Set(S.sorts.map((l) => l.k));
-  $("sortThen").innerHTML = S.sorts.slice(1).map((l, i) => `<span class="then-l">${esc(tt("затем", "then"))}</span><button class="chip thenp" type="button" data-l="${i + 1}" title="${esc(SORT_DIR[l.k][l.d < 0 ? 0 : 1])}">${esc(SORT_N[l.k])} ${l.d < 0 ? "↓" : "↑"}${CARET}</button>`).join("") +
-    (S.sorts.length < 3 && used.size < 4 ? `<button class="chip addl" type="button" data-add="1" title="${esc(tt("Сортировать ещё по одному признаку внутри первого", "Sort by one more field within the first"))}">+ ${esc(S.sorts.length > 1 ? tt("ещё уровень", "one more") : tt("затем по…", "then by…"))}</button>` : "");
-  requestAnimationFrame(() => { moveGlide($("sorts")); });
-}
-function saveSorts() { api("/api/settings", { sort: S.sorts }).catch(() => {}); }
-function applySort() {
-  paintSorts(); saveSorts();
-  if (!S.rows.length) return;
+document.querySelectorAll("#sorts .chip[data-s]").forEach((b) => b.addEventListener("click", () => {
+  if ($("sorts").classList.contains("locked")) {
+    b.classList.remove("shake"); void b.offsetWidth; b.classList.add("shake");
+    b.addEventListener("animationend", () => b.classList.remove("shake"), { once: true });
+    toast("Дождитесь окончания поиска"); return;
+  }
+  const key = b.dataset.s;
+  S.sort = { key, desc: S.sort.key === key ? !S.sort.desc : key !== "title" };
+  document.querySelectorAll("#sorts .chip[data-s]").forEach((x) => { x.classList.toggle("on", x === b); x.textContent = x.textContent.replace(/ [↑↓]$/, ""); });
+  b.textContent += S.sort.desc ? " ↓" : " ↑";
+  moveGlide($("sorts"));
   const before = new Map();
   document.querySelectorAll("#list .clip").forEach((el) => before.set(el.dataset.id, el.getBoundingClientRect().top));
   sortRows(); S.shown = 0; $("list").innerHTML = ""; renderMore(false);
@@ -4123,59 +4054,7 @@ function applySort() {
       el.addEventListener("transitionend", () => { el.style.transition = ""; }, { once: true });
     }));
   });
-}
-function sortLocked(b) {
-  if (!$("sorts").classList.contains("locked")) return false;
-  b.classList.remove("shake"); void b.offsetWidth; b.classList.add("shake");
-  b.addEventListener("animationend", () => b.classList.remove("shake"), { once: true });
-  toast("Дождитесь окончания поиска"); return true;
-}
-const defDir = (k) => (k === "title" ? 1 : -1);
-function addLevel(btn) {
-  const used = new Set(S.sorts.map((l) => l.k)), r = btn.getBoundingClientRect();
-  btn.classList.add("open");
-  openMenu([{ head: tt("Затем сортировать по", "Then sort by") }].concat(["views", "date", "dur", "title"].filter((k) => !used.has(k)).map((k) => ({
-    label: SORT_N[k], sub: SORT_DIR[k][0], run: () => {
-      S.sorts.push({ k, d: defDir(k), g: "exact" });
-      const l0 = S.sorts[0];
-      if (l0.k === "date" && (!l0.g || l0.g === "exact")) { l0.g = "day"; toast(tt("Дата теперь группируется по дням — внутри каждого дня работает следующий уровень", "Dates are now grouped by day — the next level sorts within each day")); }
-      applySort();
-    },
-  }))), r.left, r.bottom + 6, { below: true, anchorTop: r.top, onClose: () => btn.classList.remove("open") });
-}
-function levelMenu(i, btn) {
-  const l = S.sorts[i], used = new Set(S.sorts.filter((_, j) => j !== i).map((x) => x.k)), r = btn.getBoundingClientRect();
-  btn.classList.add("open");
-  openMenu([{ head: tt("Затем по", "Then by") }].concat(["views", "date", "dur", "title"].filter((k) => !used.has(k)).map((k) => ({
-    label: SORT_N[k], checkable: true, checked: l.k === k, run: () => { if (l.k !== k) { l.k = k; l.d = defDir(k); l.g = "exact"; applySort(); } },
-  })), [{ sep: true },
-    { label: SORT_DIR[l.k][0], checkable: true, checked: l.d < 0, run: () => { l.d = -1; applySort(); } },
-    { label: SORT_DIR[l.k][1], checkable: true, checked: l.d > 0, run: () => { l.d = 1; applySort(); } },
-    { sep: true },
-    { label: tt("Убрать этот уровень", "Remove this level"), run: () => { S.sorts.splice(i, 1); applySort(); } }]),
-  r.left, r.bottom + 6, { below: true, anchorTop: r.top, onClose: () => btn.classList.remove("open") });
-}
-$("sorts").addEventListener("click", (e) => {
-  const b = e.target.closest(".chip"); if (!b) return;
-  if (sortLocked(b)) return;
-  if (b.dataset.s) {
-    const k = b.dataset.s, l0 = S.sorts[0];
-    if (l0.k === k) l0.d = -l0.d;
-    else {
-      const g = k === "date" ? (S.sorts.length > 1 ? "day" : (S.lastG || "exact")) : "exact";
-      S.sorts = [{ k, d: defDir(k), g }].concat(S.sorts.slice(1).filter((x) => x.k !== k));
-    }
-    applySort(); return;
-  }
-  if (b.dataset.add) { addLevel(b); return; }
-  if (b.dataset.l) levelMenu(+b.dataset.l, b);
-});
-$("gSeg").addEventListener("click", (e) => {
-  const c = e.target.closest(".chip"); if (!c || sortLocked(c)) return;
-  const l0 = S.sorts[0]; if (l0.k !== "date" || l0.g === c.dataset.g) return;
-  l0.g = c.dataset.g; S.lastG = l0.g; applySort();
-});
-
+}));
 function viewRows() { return S.hideDone ? S.all.filter((r) => !r.dl) : S.all.slice(); }
 function paintResTitle() {
   const n = S.all.length, hid = S.hideDone ? S.all.filter((r) => r.dl).length : 0;
@@ -4292,9 +4171,7 @@ function clipEl(r, i) {
 function renderMore(anim) {
   const list = $("list"), start = S.shown, end = Math.min(S.rows.length, S.shown + 40);
   const frag = document.createDocumentFragment();
-  const g = grouping();
   for (let i = S.shown; i < end; i++) {
-    if (g && (i === 0 || S.rows[i - 1]._gk !== S.rows[i]._gk)) frag.appendChild(ghead(S.rows[i]._gk, g));
     const el = clipEl(S.rows[i], i);
     if (anim !== false) { el.classList.add("enter"); el.style.setProperty("--d", Math.min(i - start, 12) * 0.035 + "s"); el.addEventListener("animationend", () => el.classList.remove("enter"), { once: true }); }
     frag.appendChild(el);
@@ -5525,13 +5402,11 @@ addEventListener("keydown", (e) => {
   S.quality = st.quality || "1080"; paintQuality();
   if (st.prefs) {
     Object.assign(S.prefs, st.prefs);
-    if (Array.isArray(st.prefs.sort) && st.prefs.sort.length) S.sorts = st.prefs.sort.filter((l) => SORT_N[l.k]).map((l) => ({ k: l.k, d: l.d > 0 ? 1 : -1, g: l.g || "exact" })).slice(0, 3);
-    if (!S.sorts.length) S.sorts = [{ k: "views", d: -1, g: "exact" }];
     S.hideDone = !!st.prefs.hideDone; VD.sort = ["time", "views", "long"].includes(st.prefs.vodSort) ? st.prefs.vodSort : "time";
     document.querySelectorAll("#vodSort .chip").forEach((c) => c.classList.toggle("on", c.dataset.v === VD.sort));
     if (st.prefs.deepDefault) $("deep").setAttribute("aria-checked", "true");
   }
-  paintSorts();
+
   if (st.chat) { S.chat = { on: !!st.chat.on, style: { ...CHAT_DEF, ...(st.chat.style || {}) } }; paintChat(); }
   S.dir = st.downloadDir; S.history = st.history || {}; S.updateSeen = st.updateSeen || ""; paintDir(); checkLink();
   const l = st.last || {};
