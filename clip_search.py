@@ -24,6 +24,7 @@ if sys.platform == "darwin" and not os.environ.get("SSL_CERT_FILE"):
         pass
 REPO = "clipsearch-app/ClipSearch"
 TG_URL = "https://t.me/ClipSearch"
+SITE_URL = "https://clip-search.com"
 LANG = {"code": "ru"}
 
 
@@ -45,12 +46,26 @@ def L(ru, en):
     return en if LANG["code"] == "en" else ru
 
 
-RELEASE_NOTES = """- Поиск клипов работает в сетях, где провайдер замедляет зарубежные сайты: раньше там поиск долго грузился и заканчивался ошибкой «The read operation timed out».
-- Приложение быстрее получает данные от Twitch: ответы теперь приходят в сжатом виде.
+RELEASE_NOTES = """- Сортировка в несколько уровней: например, по дням, а внутри каждого дня — по просмотрам. Клипы делятся на группы с заголовками, выбор запоминается.
+- Значок «Скачан» на клипах, которые уже есть в папке загрузок: нажмите — откроется файл. Кнопка «Скрыть скачанные» убирает их из списка.
+- Значок CC на клипах с субтитрами.
+- Повторный поиск за 12 часов берётся из сохранённого и открывается почти мгновенно. Кнопка «Обновить» спрашивает Twitch заново.
+- Новое окно «Настройки»: папка, качество, сколько клипов качать одновременно (до 4), шаблон имени файла, звук по окончании загрузок, период и глубокий поиск по умолчанию, язык.
+- Записи: поиск по названию, сортировка (новые, популярные, длинные), фильтр по длине и по категории. На карточке видно, во что играл стример и когда, и сколько звука заглушил Twitch.
+- В окне скачивания записи можно одним нажатием выделить отрезок с нужной игрой.
+- Логотип слева вверху открывает сайт ClipSearch.
+- Поиск клипов работает в сетях, где провайдер замедляет зарубежные сайты: раньше там поиск долго грузился и заканчивался ошибкой «The read operation timed out».
 
 <!-- en -->
+- Multi-level sorting: for example, by day, and within each day by views. Clips are split into groups with headers, and your choice is remembered.
+- A “Downloaded” badge on clips that are already in your download folder: click it to open the file. “Hide downloaded” removes them from the list.
+- A CC badge on clips with captions.
+- Repeating a search within 12 hours uses saved results and opens almost instantly. “Refresh” asks Twitch again.
+- New Settings window: folder, quality, how many clips to download at once (up to 4), file name template, a sound when downloads finish, default period and deep search, language.
+- Videos: search by title, sorting (new, popular, long), filters by length and category. Each card shows what the streamer played and when, and how much audio Twitch muted.
+- In the video download window, one click selects the part with the game you need.
+- The logo in the top left opens the ClipSearch website.
 - Clip search now works on networks where the provider slows down foreign sites: before, the search there loaded for a long time and ended with “The read operation timed out”.
-- The app gets data from Twitch faster: responses now arrive compressed.
 """
 GITHUB_API = os.environ.get("CLIPS_GITHUB_API", "https://api.github.com")
 
@@ -321,10 +336,302 @@ def make_windows(start, end, deep):
         cur = lo
     return windows
 
+
+CACHE_TTL = 12 * 3600
+CACHE_CAP = 100 * 1024 * 1024
+CLIP_KEEP = ("id", "url", "title", "creator_name", "broadcaster_name", "broadcaster_id", "game_id", "created_at", "view_count", "duration", "thumbnail_url")
+
+
+class ClipCache:
+
+    def __init__(self, path=None):
+        self.path = path
+        self.lock = threading.Lock()
+        self.iv = {}
+        self.cc = {}
+        self.dirty = False
+        self.loaded = False
+
+    def _load(self):
+        if self.loaded:
+            return
+        self.loaded = True
+        if not self.path or not os.path.isfile(self.path):
+            return
+        try:
+            import gzip
+            with gzip.open(self.path, "rt", encoding="utf-8") as f:
+                d = json.load(f)
+            self.iv = {k: v for k, v in (d.get("iv") or {}).items() if isinstance(v, list)}
+            self.cc = {k: v for k, v in (d.get("cc") or {}).items() if isinstance(v, list) and len(v) == 2}
+            self.prune()
+        except Exception as e:
+            log(f"cache load: {e!r}")
+            self.iv, self.cc = {}, {}
+
+    def prune(self):
+        now = time.time()
+        for k in list(self.iv):
+            keep = [e for e in self.iv[k] if now - e["t"] < CACHE_TTL]
+            if keep:
+                self.iv[k] = keep
+            else:
+                del self.iv[k]
+        self.cc = {k: v for k, v in self.cc.items() if now - v[1] < CACHE_TTL}
+
+    def plan(self, key, lo, hi, budget):
+        with self.lock:
+            self._load()
+            now = time.time()
+            ents = [e for e in self.iv.get(key, []) if now - e["t"] < CACHE_TTL]
+            clips, used = {}, None
+            if lo is None:
+                for e in sorted(ents, key=lambda e: -e["t"]):
+                    if e["lo"] is None and (e["full"] or e["n"] >= budget):
+                        for c in e["clips"]:
+                            clips.setdefault(c["id"], c)
+                        return list(clips.values()), [], e["t"]
+                return [], [(None, None)], None
+            a, b = lo.timestamp(), hi.timestamp()
+            tol = min(CACHE_TTL, max(3600, (b - a) * 0.02))
+            near = [e for e in ents if not e["full"] and e["lo"] is not None and abs(e["lo"] - a) <= tol and abs(e["hi"] - b) <= tol and e["n"] >= budget]
+            if near:
+                e = max(near, key=lambda e: e["t"])
+                return [c for c in e["clips"]], [], e["t"]
+            cover = sorted(((max(a, e["lo"]), min(b, e["hi"]), e) for e in ents if e["full"] and e["lo"] is not None and e["lo"] < b and e["hi"] > a), key=lambda x: x[0])
+            gaps, cur = [], a
+            for x0, x1, e in cover:
+                if x0 > cur + 1:
+                    gaps.append((cur, x0))
+                cur = max(cur, x1)
+                used = e["t"] if used is None else min(used, e["t"])
+                for c in e["clips"]:
+                    try:
+                        ts = parse_time(c["created_at"]).timestamp()
+                    except Exception:
+                        continue
+                    if x0 <= ts < x1 or (x1 == b and ts == b):
+                        old = clips.get(c["id"])
+                        if old is None or old.get("_t", 0) < e["t"]:
+                            clips[c["id"]] = dict(c, _t=e["t"])
+            if cur < b - 1:
+                gaps.append((cur, b))
+            out = [datetime.fromtimestamp(x, timezone.utc) for g in gaps for x in g]
+            return [{k: v for k, v in c.items() if k != "_t"} for c in clips.values()], [(out[i], out[i + 1]) for i in range(0, len(out), 2)], used
+
+    def store(self, key, lo, hi, clips, full):
+        with self.lock:
+            self._load()
+            ent = {"lo": lo.timestamp() if lo else None, "hi": hi.timestamp() if hi else None, "t": time.time(), "full": bool(full), "n": len(clips),
+                   "clips": [{k: c.get(k) for k in CLIP_KEEP} for c in clips]}
+            def covered(e):
+                if e["lo"] == ent["lo"] and e["hi"] == ent["hi"]:
+                    return True
+                if ent["lo"] is None or e["lo"] is None:
+                    return False
+                if ent["full"]:
+                    return e["full"] and ent["lo"] <= e["lo"] and e["hi"] <= ent["hi"]
+                return not e["full"] and abs(e["lo"] - ent["lo"]) < 3600 and abs(e["hi"] - ent["hi"]) < CACHE_TTL
+            lst = [e for e in self.iv.get(key, []) if not covered(e)]
+            lst.append(ent)
+            self.iv[key] = lst
+            self.dirty = True
+
+    def captions_get(self, ids):
+        with self.lock:
+            self._load()
+            now = time.time()
+            return {i: self.cc[i][0] for i in ids if i in self.cc and now - self.cc[i][1] < CACHE_TTL}
+
+    def captions_put(self, d):
+        with self.lock:
+            self._load()
+            now = time.time()
+            for k, v in d.items():
+                self.cc[k] = [bool(v), now]
+            self.dirty = True
+
+    def size(self):
+        try:
+            return os.path.getsize(self.path) if self.path and os.path.isfile(self.path) else 0
+        except OSError:
+            return 0
+
+    def save(self):
+        with self.lock:
+            if not self.dirty or not self.path:
+                return
+            self.prune()
+            data = {"iv": self.iv, "cc": self.cc}
+            raw = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+            while len(raw) > CACHE_CAP * 4 and self.iv:
+                oldest = min(((k, e) for k, l in self.iv.items() for e in l), key=lambda x: x[1]["t"])
+                self.iv[oldest[0]].remove(oldest[1])
+                if not self.iv[oldest[0]]:
+                    del self.iv[oldest[0]]
+                raw = json.dumps({"iv": self.iv, "cc": self.cc}, ensure_ascii=False, separators=(",", ":"))
+            self.dirty = False
+        try:
+            import gzip
+            tmp = self.path + ".tmp"
+            with gzip.open(tmp, "wt", encoding="utf-8", compresslevel=5) as f:
+                f.write(raw)
+            os.replace(tmp, self.path)
+        except Exception as e:
+            log(f"cache save: {e!r}")
+
+    def clear(self):
+        with self.lock:
+            self.iv, self.cc, self.dirty, self.loaded = {}, {}, False, True
+        try:
+            if self.path and os.path.isfile(self.path):
+                os.remove(self.path)
+        except OSError:
+            pass
+
+
+CACHE = ClipCache()
+CLIP_NAME_RE = re.compile(r"^(.*) - ([A-Za-z0-9_-]+?)(?: \([^)]*\))?(?: \[[^\]]*\])?\.(mp4|mov|mkv|m4a|ts)$", re.I)
+VOD_NAME_RE = re.compile(r" - v(\d{3,15})(?: \(|\s\[|\.)")
+
+
+class DoneStore:
+
+    def __init__(self, path=None):
+        self.path = path
+        self.lock = threading.Lock()
+        self.d = None
+
+    def _load(self):
+        if self.d is not None:
+            return
+        self.d = {}
+        try:
+            if self.path and os.path.isfile(self.path):
+                with open(self.path, encoding="utf-8") as f:
+                    d = json.load(f)
+                if isinstance(d, dict):
+                    self.d = {str(k): str(v) for k, v in d.items()}
+        except Exception as e:
+            log(f"downloaded load: {e!r}")
+
+    def add(self, key, path):
+        if not path:
+            return
+        with self.lock:
+            self._load()
+            self.d[key] = path
+            try:
+                tmp = self.path + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(self.d, f, ensure_ascii=False)
+                os.replace(tmp, self.path)
+            except Exception as e:
+                log(f"downloaded save: {e!r}")
+
+    def lookup(self, clips=(), vods=(), folder=None):
+        clips, vods = set(clips), set(vods)
+        out_c, out_v = {}, {}
+        with self.lock:
+            self._load()
+            d = dict(self.d)
+        for i in clips:
+            p = d.get("c:" + i)
+            if p and os.path.isfile(p):
+                out_c[i] = p
+        for i in vods:
+            p = d.get("v:" + i)
+            if p and os.path.isfile(p):
+                out_v[i] = p
+        if folder and os.path.isdir(folder) and (len(out_c) < len(clips) or len(out_v) < len(vods)):
+            try:
+                names = os.listdir(folder)
+            except OSError:
+                names = []
+            for n in names:
+                if n.endswith((".part", ".tmp")) or ".part." in n:
+                    continue
+                m = VOD_NAME_RE.search(n)
+                if m and m.group(1) in vods and m.group(1) not in out_v:
+                    out_v[m.group(1)] = os.path.join(folder, n)
+                    continue
+                m = CLIP_NAME_RE.match(n)
+                if m and m.group(2) in clips and m.group(2) not in out_c:
+                    out_c[m.group(2)] = os.path.join(folder, n)
+        return out_c, out_v
+
+
+DONE = DoneStore()
+CHAPTERS = {}
+CHAPTERS_LOCK = threading.Lock()
+
+
+def vod_chapters(ids, cancel=None):
+    from concurrent.futures import ThreadPoolExecutor
+    ids = [i for i in dict.fromkeys(str(x) for x in ids) if re.fullmatch(r"\d{1,15}", i)]
+    now = time.time()
+    with CHAPTERS_LOCK:
+        out = {i: CHAPTERS[i][0] for i in ids if i in CHAPTERS and now - CHAPTERS[i][1] < CHAPTERS[i][2]}
+    need = [i for i in ids if i not in out]
+    q1 = ("v{n}: video(id: \"{id}\") {{ lengthSeconds broadcastType game {{ displayName }} "
+          "moments(momentRequestType: VIDEO_CHAPTER_MARKERS) {{ edges {{ node {{ positionMilliseconds durationMilliseconds description "
+          "details {{ ... on GameChangeMomentDetails {{ game {{ displayName }} }} }} }} }} }} }}")
+
+    def parse(v):
+        if not isinstance(v, dict):
+            return None
+        game = ((v.get("game") or {}).get("displayName") or "").strip()
+        ch = []
+        for e in ((v.get("moments") or {}).get("edges") or []):
+            n = e.get("node") or {}
+            name = (((n.get("details") or {}).get("game") or {}).get("displayName") or n.get("description") or "").strip()
+            try:
+                st, du = int(n.get("positionMilliseconds") or 0) // 1000, int(n.get("durationMilliseconds") or 0) // 1000
+            except (TypeError, ValueError):
+                continue
+            if name:
+                ch.append([st, du, name])
+        ch.sort()
+        if not ch and game:
+            ch = [[0, int(v.get("lengthSeconds") or 0), game]]
+        return {"game": game, "chapters": ch}
+
+    def batch(part, tries=2):
+        if cancel is not None and cancel.is_set():
+            return {}
+        q = "query { " + " ".join(q1.format(n=j, id=x) for j, x in enumerate(part)) + " }"
+        got = {}
+        try:
+            data = gql_post({"query": q}).get("data") or {}
+        except Exception as e:
+            log(f"chapters: {e!r}")
+            data = {}
+        for j, x in enumerate(part):
+            r = parse(data.get(f"v{j}"))
+            if r is not None:
+                got[x] = r
+        miss = [x for x in part if x not in got]
+        if miss and tries > 0:
+            for x in miss:
+                got.update(batch([x], tries - 1))
+        return got
+
+    if need:
+        with ThreadPoolExecutor(3) as ex:
+            for g in ex.map(batch, [need[i:i + 5] for i in range(0, len(need), 5)]):
+                out.update(g)
+        with CHAPTERS_LOCK:
+            for i in need:
+                if i in out:
+                    CHAPTERS[i] = (out[i], time.time(), 6 * 3600)
+    return out
+
 def clip_captions(slugs, cancel=None, progress=None):
     from concurrent.futures import ThreadPoolExecutor
+    out = CACHE.captions_get(slugs)
+    slugs = [x for x in slugs if x not in out]
     batches = [slugs[i:i + 15] for i in range(0, len(slugs), 15)]
-    out, done = {}, [0]
+    done = [0]
     lock = threading.Lock()
     def one(part):
         if cancel is not None and cancel.is_set():
@@ -347,10 +654,11 @@ def clip_captions(slugs, cancel=None, progress=None):
         list(ex.map(one, batches))
     if cancel is not None and cancel.is_set():
         raise Cancelled()
+    CACHE.captions_put({k: v for k, v in out.items() if k in set(slugs)})
     return out
 
 def search_clips(tw, login="", game_id="", words="", start=None, end=None, creator="", min_views=0,
-                 max_pages=10, deep=False, progress=None, cancel=None, game_names=None, captions=""):
+                 max_pages=10, deep=False, progress=None, cancel=None, game_names=None, captions="", use_cache=True):
     logins = [login] if isinstance(login, str) else list(login or [])
     logins = [l for l in logins if l]
     gids = [game_id] if isinstance(game_id, str) else list(game_id or [])
@@ -369,10 +677,10 @@ def search_clips(tw, login="", game_id="", words="", start=None, end=None, creat
             created = parse_time(u["created_at"][:19] + "Z")
         except Exception:
             created = None
-        targets.append(({"first": 100, "broadcaster_id": u["id"]}, created, u.get("display_name") or l))
+        targets.append(({"first": 100, "broadcaster_id": u["id"]}, created, u.get("display_name") or l, "b:" + u["id"]))
     if not targets:
         for g in gids:
-            targets.append(({"first": 100, "game_id": g}, None, (game_names or {}).get(g, "")))
+            targets.append(({"first": 100, "game_id": g}, None, (game_names or {}).get(g, ""), "g:" + g))
 
     now = datetime.now(timezone.utc)
     if end is not None and end > now:
@@ -384,7 +692,28 @@ def search_clips(tw, login="", game_id="", words="", start=None, end=None, creat
     found, seen = [], set()
     scanned = 0
     truncated = False
-    for ti, (base, created, who) in enumerate(targets):
+    cached_at, cached_n = None, 0
+
+    def accept(c):
+        if c["id"] in seen:
+            return
+        seen.add(c["id"])
+        title = str(c.get("title", "")).lower()
+        if include and not all(w in title for w in include):
+            return
+        if exclude and any(w in title for w in exclude):
+            return
+        if creators:
+            who_made = str(c.get("creator_name", "")).lower()
+            if not any(cr in who_made for cr in creators):
+                return
+        if c.get("view_count", 0) < min_views:
+            return
+        if logins and gset and c.get("game_id") not in gset:
+            return
+        found.append(c)
+
+    for ti, (base, created, who, ckey) in enumerate(targets):
         if dated:
             t_end = end or now
             t_start = start or (max(created, TWITCH_CLIPS_START) if created else TWITCH_CLIPS_START)
@@ -392,50 +721,55 @@ def search_clips(tw, login="", game_id="", words="", start=None, end=None, creat
         else:
             windows = [(None, None)]
         for wi, (lo, hi) in enumerate(windows):
-            cursor = None
-            taken = 0
-            while taken < max_pages * 100:
-                if cancel is not None and cancel.is_set():
-                    raise Cancelled()
-                params = dict(base)
-                if dated:
-                    params["started_at"] = rfc3339(lo)
-                    params["ended_at"] = rfc3339(hi)
-                if cursor:
-                    params["after"] = cursor
-                r = tw.get("/clips", params, cancel)
-                taken += SMALL_FIRST if SMALL_PAGES["on"] else 100
-                data = r.get("data") or []
-                scanned += len(data)
-                for c in data:
-                    if c["id"] in seen:
-                        continue
-                    seen.add(c["id"])
-                    title = str(c.get("title", "")).lower()
-                    if include and not all(w in title for w in include):
-                        continue
-                    if exclude and any(w in title for w in exclude):
-                        continue
-                    if creators:
-                        who_made = str(c.get("creator_name", "")).lower()
-                        if not any(cr in who_made for cr in creators):
-                            continue
-                    if c.get("view_count", 0) < min_views:
-                        continue
-                    if logins and gset and c.get("game_id") not in gset:
-                        continue
-                    found.append(c)
-                cursor = (r.get("pagination") or {}).get("cursor")
-                if progress:
-                    inner = (wi + (1.0 if not cursor else min(1.0, taken / (max_pages * 100)))) / len(windows)
-                    progress({"scanned": scanned, "found": len(found), "step": wi + 1, "steps": len(windows),
-                              "who": who, "ti": ti + 1, "tn": len(targets),
-                              "frac": (ti + inner) / len(targets)})
-                if len(found) >= MAX_RESULTS or not cursor:
-                    break
+            if use_cache:
+                cached, subs, ct = CACHE.plan(ckey, lo, hi, max_pages * 100)
             else:
-                if cursor and not deep:
-                    truncated = True
+                cached, subs, ct = [], [(lo, hi)], None
+            if cached:
+                cached_n += len(cached)
+                cached_at = ct if cached_at is None else min(cached_at, ct)
+                scanned += len(cached)
+                for c in cached:
+                    accept(c)
+            for (slo, shi) in subs:
+                cursor = None
+                taken = 0
+                got = []
+                full = False
+                while taken < max_pages * 100:
+                    if cancel is not None and cancel.is_set():
+                        raise Cancelled()
+                    params = dict(base)
+                    if dated:
+                        params["started_at"] = rfc3339(slo)
+                        params["ended_at"] = rfc3339(shi)
+                    if cursor:
+                        params["after"] = cursor
+                    r = tw.get("/clips", params, cancel)
+                    taken += SMALL_FIRST if SMALL_PAGES["on"] else 100
+                    data = r.get("data") or []
+                    scanned += len(data)
+                    got.extend(data)
+                    for c in data:
+                        accept(c)
+                    cursor = (r.get("pagination") or {}).get("cursor")
+                    if progress:
+                        inner = (wi + (1.0 if not cursor else min(1.0, taken / (max_pages * 100)))) / len(windows)
+                        progress({"scanned": scanned, "found": len(found), "step": wi + 1, "steps": len(windows),
+                                  "who": who, "ti": ti + 1, "tn": len(targets),
+                                  "frac": (ti + inner) / len(targets)})
+                    if not cursor:
+                        full = True
+                        break
+                    if len(found) >= MAX_RESULTS:
+                        break
+                else:
+                    if cursor and not deep:
+                        truncated = True
+                if got or full:
+                    CACHE.store(ckey, slo, shi, got, full)
+                if len(found) >= MAX_RESULTS:
+                    break
             if len(found) >= MAX_RESULTS:
                 truncated = True
                 break
@@ -443,9 +777,11 @@ def search_clips(tw, login="", game_id="", words="", start=None, end=None, creat
             break
 
     cc_unknown = 0
+    cc_known = CACHE.captions_get([c["id"] for c in found])
     if captions in ("yes", "no") and found:
         cc_prog = (lambda d, n: progress({"scanned": scanned, "found": len(found), "frac": 0.95 + 0.04 * d / max(1, n), "cc": [d, n]})) if progress else None
         cc = clip_captions([c["id"] for c in found], cancel, cc_prog)
+        cc_known.update(cc)
         cc_unknown = sum(1 for c in found if c["id"] not in cc)
         found = [c for c in found if cc.get(c["id"]) is (captions == "yes")]
     found.sort(key=lambda c: c.get("view_count", 0), reverse=True)
@@ -467,8 +803,11 @@ def search_clips(tw, login="", game_id="", words="", start=None, end=None, creat
             "views": int(c.get("view_count", 0)),
             "duration": float(c.get("duration", 0)),
             "thumb": c.get("thumbnail_url", ""),
+            "cc": cc_known.get(c["id"]),
         })
-    return rows, {"scanned": scanned, "truncated": truncated, "captions": captions if captions in ("yes", "no") else "", "cc_unknown": cc_unknown}
+    threading.Thread(target=CACHE.save, daemon=True).start()
+    return rows, {"scanned": scanned, "truncated": truncated, "captions": captions if captions in ("yes", "no") else "", "cc_unknown": cc_unknown,
+                  "cachedAt": int(cached_at * 1000) if cached_at else 0, "cachedN": cached_n}
 
 QUALITIES = ("1080", "720", "480")
 
@@ -495,6 +834,30 @@ def get_download_url(slug, preview=False, quality=None):
         return url, best["quality"]
     except Exception:
         raise TwitchError(f"Не удалось получить ссылку на скачивание клипа {slug}.")
+
+NAME_TPL_DEFAULT = "{streamer} - {title}"
+NAME_TPL = {"v": NAME_TPL_DEFAULT}
+
+
+def name_fields(streamer="", title="", created="", game="", views=None, creator=""):
+    d = ""
+    try:
+        d = parse_time(str(created)[:19] + "Z").astimezone().strftime("%Y-%m-%d") if created else ""
+    except Exception:
+        d = ""
+    return {"streamer": streamer or "", "title": title or "", "date": d, "game": game or "",
+            "views": "" if views in (None, "") else str(views), "creator": creator or ""}
+
+
+def render_name(fields, fallback):
+    tpl = NAME_TPL["v"] or NAME_TPL_DEFAULT
+    out = re.sub(r"\{(streamer|title|date|game|views|creator)\}", lambda m: str(fields.get(m.group(1)) or ""), tpl)
+    out = re.sub(r"\s*(?:-\s*){2,}", " - ", out)
+    out = re.sub(r"^[\s\-_.·]+|[\s\-_.·]+$", "", out)
+    out = safe_name(out) if out.strip() else ""
+    out = re.sub(r"^[\s\-]+|[\s\-]+$", "", out)
+    return (out[:150] if out else safe_name(fallback))
+
 
 def safe_name(s):
     s = re.sub(r'[\\/:*?"<>|\r\n\t]+', " ", s).strip(" .")
@@ -548,7 +911,9 @@ def download_clip(row, folder, progress=None, cancel=None, start=None, end=None,
     tail = f" ({mmss(start)}-{mmss(end)})" if cut else ""
     if quality and quality != "1080":
         tail += f" [{int(float(got))}p]"
-    name = f'{safe_name(row["broadcaster"] or "clip")} - {safe_name(row["title"])} - {row["id"]}{tail}.mp4'
+    base = render_name(name_fields(row.get("broadcaster") or "", row.get("title") or "", row.get("created") or "", row.get("game") or "",
+                                   row.get("views"), row.get("creator") or ""), row.get("broadcaster") or "clip")
+    name = f'{base} - {row["id"]}{tail}.mp4'
     path = os.path.join(folder, name)
     tmp = path + ".part"
     if cut:
@@ -1556,7 +1921,9 @@ def download_vod(src, folder, progress=None, cancel=None):
     if quality != "1080":
         tail += f" [{v['name']}]"
     ext = ".m4a" if audio else ".mp4"
-    name = f'{safe_name(src.get("login") or "twitch")} - {safe_name(src.get("title") or "VOD")} - v{src["id"]}{tail}{ext}'
+    base = render_name(name_fields(src.get("name") or src.get("login") or "", src.get("title") or "", src.get("created") or "", src.get("game") or "",
+                                   src.get("views")), src.get("login") or "twitch")
+    name = f'{base} - v{src["id"]}{tail}{ext}'
     path = os.path.join(folder, name)
     tmp = path + ".part"
     chat = chat_style(src.get("chat")) if not audio else None
@@ -1710,7 +2077,7 @@ svg.i { width: 1em; height: 1em; fill: none; stroke: currentColor; stroke-width:
 .top { user-select: none; }
 .dragbar { position: fixed; top: 0; left: 224px; right: 150px; height: 54px; -webkit-app-region: drag; z-index: 1; }
 .top button, .top .pill, .wc, .wc button { -webkit-app-region: no-drag; }
-.brand { -webkit-app-region: drag; user-select: none; }
+.brand { -webkit-app-region: no-drag; user-select: none; }
 .wc { position: fixed; top: 0; right: 0; z-index: 70; display: flex; -webkit-app-region: no-drag; }
 .wc button { width: 48px; height: 34px; background: none; border: 0; border-radius: 0; color: var(--muted); display: grid; place-items: center; font-size: 15px; }
 .wc button:hover { background: rgba(150, 172, 255, 0.16); color: #fff; }
@@ -2538,6 +2905,93 @@ input[type=range].rg:disabled { opacity: .4; }
 .cnote { color: var(--muted); font-size: 12.5px; margin-top: 12px; }
 .pchatmsg { position: absolute; left: 12px; top: 12px; z-index: 3; font-size: 12px; padding: 3px 10px; border-radius: 10px; background: rgba(5, 8, 24, .78); color: var(--muted); pointer-events: none; }
 @media (max-width: 760px) { .cgrid { grid-template-columns: 1fr; } }
+
+button.brand { border: 0; background: none; color: inherit; font: inherit; cursor: pointer; text-align: left; width: 100%; border-radius: 14px; }
+.brand img { transition: filter .4s var(--ease), transform .5s var(--spring); }
+.brand b { transition: text-shadow .4s ease; }
+.brand:hover img, .brand:focus-visible img { filter: drop-shadow(0 0 7px rgba(125, 150, 255, 0.95)) drop-shadow(0 0 20px rgba(122, 99, 255, 0.6)); transform: scale(1.07) rotate(-4deg); }
+.brand:hover b, .brand:focus-visible b { text-shadow: 0 0 14px rgba(140, 164, 255, 0.85), 0 0 30px rgba(122, 99, 255, 0.45); }
+.brand:active img { transform: scale(.95); transition-duration: .12s; }
+
+.sorts .thenp, .sorts .addl, .gseg .chip { height: 32px; padding: 0 12px; font-size: 13px; }
+.sorts .then-l { color: var(--muted); font-size: 13px; align-self: center; margin: 0 0 0 6px; }
+.sorts .thenp { display: inline-flex; align-items: center; gap: 5px; }
+.sorts .thenp .i { width: 14px; height: 14px; opacity: .65; }
+.sorts .addl { border-style: dashed; color: var(--muted); background: transparent; }
+.sorts .addl:hover { color: var(--text); }
+.sorts .hidedl { height: 32px; font-size: 13px; margin-left: 8px; gap: 8px; }
+.sorts .hidedl .tr { width: 34px; height: 20px; }
+.sorts .hidedl .tr::after { width: 14px; height: 14px; }
+.sorts .hidedl[aria-checked="true"] .tr::after { left: 16px; }
+.gseg { flex: 1 1 100%; order: 4; gap: 6px; margin-top: -2px; }
+.gseg .lbl { font-size: 13px; }
+.gseg[hidden] { display: none; }
+.ghead { display: flex; align-items: center; gap: 9px; margin: 14px 4px 0; font-size: 13px; color: var(--muted); animation: fadeIn .35s ease both; }
+.ghead:first-child { margin-top: 0; }
+.ghead b { color: var(--text); font-weight: 500; font-size: 15px; }
+.ghead b::first-letter { text-transform: uppercase; }
+.ghead::after { content: ""; flex: 1; height: 1px; background: linear-gradient(90deg, var(--line-strong), transparent); }
+.thumb .bdg, .vd .vth .bdg { position: absolute; left: 7px; bottom: 7px; z-index: 3; display: flex; gap: 5px; align-items: center; pointer-events: none; }
+.bdg > * { pointer-events: auto; }
+.ccb { background: rgba(5, 8, 24, 0.82); color: #dfe5ff; font-size: 10.5px; font-weight: 700; letter-spacing: .06em; padding: 2px 6px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.22); animation: fadeIn .3s ease both; }
+.dlb { display: inline-flex; align-items: center; gap: 4px; border: 0; font: inherit; font-size: 11.5px; font-weight: 600; color: #fff; padding: 2px 8px 2px 6px; border-radius: 7px; cursor: pointer;
+  background: linear-gradient(180deg, rgba(46, 184, 120, 0.95), rgba(30, 140, 92, 0.95)); box-shadow: 0 2px 10px rgba(20, 120, 80, 0.45); animation: fadeIn .3s ease both; }
+.dlb .i { width: 12px; height: 12px; stroke-width: 3; }
+.dlb:hover { filter: brightness(1.12); }
+.res-head .rfr { margin-left: 6px; }
+.linkbtn.rfr { color: #aebcff; }
+
+.setdlg { width: 780px; max-width: 100%; max-height: calc(100vh - 40px); display: flex; flex-direction: column; }
+.setdlg .ph { display: flex; align-items: center; gap: 14px; margin-bottom: 6px; }
+.setdlg .ph h2 { margin: 0; font-weight: 500; font-size: 22px; flex: 1; }
+.setdlg .xbtn { width: 38px; height: 38px; border-radius: 50%; border: 1px solid var(--line); color: var(--muted); display: grid; place-items: center; flex: none; }
+.setdlg .xbtn:hover { color: #fff; border-color: #8aa0ff; }
+.stbody { overflow-y: auto; margin: 0 -8px; padding: 0 8px; }
+.stbody section { padding: 14px 0 6px; border-top: 1px solid var(--line); }
+.stbody section:first-child { border-top: 0; }
+.stbody h3 { margin: 0 0 8px; font-size: 12px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: #9fb0ff; }
+.srow { display: flex; align-items: center; gap: 14px; min-height: 44px; padding: 3px 0; }
+.srow.top { align-items: flex-start; }
+.srow.top > .lbl { padding-top: 11px; }
+.srow > .lbl { width: 200px; flex: none; color: var(--muted); font-size: 13.5px; line-height: 1.35; }
+.srow > .lbl small { display: block; color: var(--faint); font-size: 12px; margin-top: 2px; }
+.srow .seg .chip { height: 34px; padding: 0 14px; font-size: 13px; }
+.srow .grow, .setdlg .foot .grow { flex: 1; }
+.spath { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; }
+.sgrow { flex: 1; min-width: 0; display: grid; gap: 8px; }
+.sgrow .field { height: 42px; margin-bottom: 0; }
+.res-head .kbtn { margin-left: -6px; }
+.tok { display: flex; flex-wrap: wrap; gap: 6px; }
+.tok button { border: 1px dashed rgba(150, 172, 255, 0.3); background: rgba(10, 16, 46, 0.42); color: var(--muted); font: inherit; font-size: 12px; padding: 3px 10px; border-radius: 999px; cursor: pointer; }
+.tok button:hover { color: var(--text); border-color: #8aa0ff; }
+.snote { color: var(--faint); font-size: 12.5px; line-height: 1.45; }
+.snote b { color: var(--text); font-weight: 500; word-break: break-all; }
+.snote.w { color: var(--warn); }
+.stcache { flex: 1; color: var(--muted); font-size: 13.5px; line-height: 1.45; }
+.stcache b { color: var(--text); font-weight: 500; }
+.setdlg .foot { align-items: center; margin-top: 14px; }
+#stReset.armed { color: #fff; border-color: transparent; background: linear-gradient(180deg, #ef4d63, #c7334a); }
+
+.vtools { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; margin: 0 0 14px; animation: riseT .4s var(--ease) both; }
+.vtools[hidden] { display: none; }
+.vtools .vfind { flex: 1 1 240px; height: 40px; min-width: 200px; }
+.vtools .seg .chip { height: 32px; padding: 0 12px; font-size: 13px; }
+.vtools .vcats { flex: 1 1 100%; gap: 6px; }
+.vtools .vcats[hidden] { display: none; }
+.vtools .vcats .chip { height: 30px; padding: 0 11px; font-size: 12.5px; }
+.vtools .vcats .chip i { font-style: normal; opacity: .6; margin-left: 4px; }
+.vd .vth .mutb { position: absolute; right: 7px; top: 7px; display: inline-flex; align-items: center; gap: 4px; background: rgba(40, 22, 6, 0.86); color: var(--warn); font-size: 11.5px; font-weight: 600; padding: 2px 7px; border-radius: 7px; z-index: 2; }
+.vd .vth .mutb .i { width: 13px; height: 13px; }
+.vchap { display: flex; flex-wrap: wrap; gap: 4px 6px; margin-top: 8px; font-size: 12.5px; color: var(--muted); min-height: 18px; }
+.vchap span { display: inline-flex; gap: 5px; align-items: baseline; padding: 1px 9px; border-radius: 999px; background: rgba(90, 120, 255, 0.12); border: 1px solid rgba(130, 156, 255, 0.16); animation: fadeIn .3s ease both; }
+.vchap span b { color: var(--text); font-weight: 500; }
+.vchap span.more { background: none; border-color: transparent; }
+.vdempty { color: var(--muted); font-size: 14px; padding: 18px 6px; }
+.vdchap { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; align-items: center; }
+.vdchap[hidden] { display: none; }
+.vdchap .lbl { color: var(--muted); font-size: 13px; margin-right: 2px; }
+.vdchap .chip { height: 30px; padding: 0 11px; font-size: 12.5px; }
+.vdchap .chip i { font-style: normal; opacity: .65; margin-left: 5px; font-variant-numeric: tabular-nums; }
 </style>
 </head>
 <body>
@@ -2563,7 +3017,7 @@ input[type=range].rg:disabled { opacity: .4; }
 </div>
 <div class="shell">
   <aside class="side">
-    <div class="brand"><img src="/icon.png" alt=""><b>Clip<span>Search</span></b></div>
+    <button class="brand" id="brand" type="button" title="clip-search.com"><img src="/icon.png" alt=""><b>Clip<span>Search</span></b></button>
     <nav class="nav" aria-label="Разделы" id="mainNav"><span class="navind" id="navInd"></span>
       <button class="on" data-view="search"><span class="ic"><svg class="i" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg></span><span>Поиск</span></button>
       <button data-view="vods"><span class="ic"><svg class="i" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="m10.2 9.2 4.6 2.8-4.6 2.8z"/></svg></span><span>Записи</span></button>
@@ -2572,11 +3026,11 @@ input[type=range].rg:disabled { opacity: .4; }
     <div class="spacer"></div>
     <div class="side-status"><div class="pill" id="keyPill"><span class="dot"></span><span id="keyText">Проверяю связь…</span></div></div>
     <nav class="nav" aria-label="Программа">
+      <button id="navSet" type="button"><span class="ic"><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></span><span>Настройки</span></button>
       <button id="navReport" type="button"><span class="ic"><svg class="i" viewBox="0 0 24 24"><path d="M12 3.5 21.5 20h-19z"/><path d="M12 10v4.5M12 17.2v.1"/></svg></span><span>Нашли ошибку?</span></button>
       <button id="navTg" type="button"><span class="ic"><svg class="i" viewBox="0 0 24 24"><path d="M4 12.5 20 5l-3 14-5.5-4.5L9 17l-.5-4.5z"/><path d="m8.5 12.5 8-5.5"/></svg></span><span>Telegram-канал</span></button>
       <button id="navQuit"><span class="ic"><svg class="i" viewBox="0 0 24 24"><path d="M10 4H5v16h5M15 8l4 4-4 4M19 12H9"/></svg></span><span>Выйти</span></button>
     </nav>
-    <div class="langsw" role="group" aria-label="Язык"><button type="button" data-lang="ru">RU</button><button type="button" data-lang="en">EN</button></div>
     <div class="foot">Версия __VERSION__<button class="linkbtn" id="updCheck" type="button">Проверить обновления</button><button class="upd-pill" id="updPill" type="button" hidden><span class="dot"></span><span id="updPillText">Доступно обновление</span></button></div>
   </aside>
 
@@ -2645,15 +3099,17 @@ input[type=range].rg:disabled { opacity: .4; }
             <div id="alert"></div>
             <div class="res-head" id="resHead" hidden>
               <h2 id="resTitle">Найдено</h2>
-              <button class="rsbtn" id="resReset" type="button" title="Сбросить результаты (Esc)"><svg class="i" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
-              <span class="status" id="resStatus"></span>
+              <button class="rsbtn" id="resReset" type="button" title="Сбросить результаты (Esc)"><svg class="i" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button>              <button class="kbtn" id="keysBtn" type="button" title="Горячие клавиши (?)"><svg class="i" viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="12" rx="3"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10"/></svg></button>
+              <span class="status" id="resStatus"></span><span id="resStatus2" style="display:contents"></span>
               <div class="sorts" id="sorts"><span class="glide"></span>
                 <button class="chip on" data-s="views">Просмотры</button>
                 <button class="chip" data-s="date">Дата</button>
                 <button class="chip" data-s="dur">Длительность</button>
                 <button class="chip" data-s="title">Название</button>
-                <button class="kbtn" id="keysBtn" type="button" title="Горячие клавиши (?)"><svg class="i" viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="12" rx="3"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10"/></svg></button>
+                <span id="sortThen" style="display:contents"></span>
+                <button class="switch hidedl" id="hideDl" type="button" role="switch" aria-checked="false" hidden><span class="tr"></span><span id="hideDlT">Скрыть скачанные</span></button>
               </div>
+              <div class="seg solid gseg" id="gSeg" hidden><span class="lbl">Группы</span><button class="chip" type="button" data-g="exact">Нет</button><button class="chip" type="button" data-g="hour">По часам</button><button class="chip" type="button" data-g="day">По дням</button><button class="chip" type="button" data-g="week">По неделям</button></div>
             </div>
             <div class="list" id="list"><div class="empty" id="firstEmpty"><div class="big"><svg class="i" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg></div><h3>Здесь появятся клипы</h3><p>Впишите стримера или категорию, выберите период и нажмите «Искать». Дату можно задать точно: с 01.02.2024 по 03.02.2026.</p></div></div>
             <button class="btn more" id="more" hidden>Показать ещё</button>
@@ -2698,6 +3154,12 @@ input[type=range].rg:disabled { opacity: .4; }
           <div class="seg solid" id="vodType"><span class="lbl">Показывать</span><button class="chip on" type="button" data-t="archive">Трансляции</button><button class="chip" type="button" data-t="highlight">Хайлайты</button><button class="chip" type="button" data-t="upload">Загруженные</button></div>
         </div>
         <div id="vodAlert"></div>
+        <div class="vtools" id="vodTools" hidden>
+          <label class="field vfind" for="vodFind"><svg class="i" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input id="vodFind" placeholder="Поиск по названию записи" autocomplete="off" spellcheck="false"></label>
+          <div class="seg solid" id="vodSort"><span class="lbl">Сначала</span><button class="chip on" type="button" data-v="time">Новые</button><button class="chip" type="button" data-v="views">Популярные</button><button class="chip" type="button" data-v="long">Длинные</button></div>
+          <div class="seg solid" id="vodMin"><span class="lbl">Длина</span><button class="chip on" type="button" data-v="0">Любая</button><button class="chip" type="button" data-v="3600">от 1 ч</button><button class="chip" type="button" data-v="10800">от 3 ч</button><button class="chip" type="button" data-v="21600">от 6 ч</button></div>
+          <div class="seg solid vcats" id="vodCats" hidden></div>
+        </div>
         <div class="vod-list" id="vodList"><div class="empty"><div class="big"><svg class="i" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="m10.2 9.2 4.6 2.8-4.6 2.8z"/></svg></div><h3>Здесь появятся записи</h3><p>Впишите стримера — покажем его последние трансляции. Или вставьте ссылку на конкретную запись.</p></div></div>
         <button class="btn more" id="vodMore" type="button" hidden>Показать ещё</button>
       </div>
@@ -2803,6 +3265,7 @@ input[type=range].rg:disabled { opacity: .4; }
           <label class="field tfield"><span>по</span><input id="vdB" inputmode="numeric" autocomplete="off" spellcheck="false"></label>
           <span class="vdquick" id="vdQuick"></span>
         </div>
+        <div class="vdchap" id="vdChap" hidden></div>
       </div>
       <div class="seg solid" id="vdQ"><span class="lbl">Качество</span></div>
       <div class="chatopt" data-chatopt><button class="switch" type="button" role="switch" aria-checked="false" data-chaton title="Добавить к видео чат трансляции — каким он был в этот момент. Чат берётся из записи эфира."><span class="tr"></span>Чат трансляции</button><button class="cset" type="button" data-chatset hidden title="Настроить чат: размер, фон, положение"><svg class="i" viewBox="0 0 24 24"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg><span class="cs-t"></span></button></div>
@@ -2824,6 +3287,32 @@ input[type=range].rg:disabled { opacity: .4; }
     </div>
     <div class="cnote" id="cNote"></div>
     <div class="foot"><button class="btn" id="cReset" type="button">Сбросить</button><button class="btn primary" id="cDone" type="button">Готово</button></div>
+  </div>
+</div>
+<div class="veil" id="setVeil">
+  <div class="modal setdlg" role="dialog" aria-labelledby="stTitle">
+    <div class="ph"><h2 id="stTitle">Настройки</h2><button class="xbtn" id="stClose" type="button" aria-label="Закрыть"><svg class="i" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
+    <div class="stbody">
+      <section><h3>Загрузки</h3>
+        <div class="srow"><span class="lbl">Папка загрузок</span><span class="spath" id="stDir"></span><button class="btn slim" id="stDirBtn" type="button">Изменить</button></div>
+        <div class="srow"><span class="lbl">Качество клипов</span><div class="seg solid" id="stQ"><button class="chip" type="button" data-v="1080">1080p</button><button class="chip" type="button" data-v="720">720p</button><button class="chip" type="button" data-v="480">480p</button></div></div>
+        <div class="srow"><span class="lbl">Скачивать одновременно<small>Больше — быстрее, если интернет быстрый</small></span><div class="seg solid" id="stPar"><button class="chip" type="button" data-v="1">1</button><button class="chip" type="button" data-v="2">2</button><button class="chip" type="button" data-v="3">3</button><button class="chip" type="button" data-v="4">4</button></div></div>
+        <div class="srow top"><span class="lbl">Имя файла<small>Нажмите на поле ниже, чтобы добавить его</small></span><div class="sgrow"><label class="field" for="stName"><input id="stName" maxlength="120" autocomplete="off" spellcheck="false"></label><div class="tok" id="stTok"><button type="button" data-t="{streamer}">стример</button><button type="button" data-t="{title}">название</button><button type="button" data-t="{date}">дата</button><button type="button" data-t="{game}">категория</button><button type="button" data-t="{views}">просмотры</button><button type="button" data-t="{creator}">автор клипа</button><button type="button" data-t="" id="stNameDef">как было</button></div><div class="snote" id="stNameEx"></div></div></div>
+        <div class="srow"><span class="lbl">Звук, когда всё скачалось</span><button class="switch" type="button" role="switch" aria-checked="true" id="stSound"><span class="tr"></span></button></div>
+      </section>
+      <section><h3>Поиск</h3>
+        <div class="srow"><span class="lbl">Глубокий поиск включён сразу</span><button class="switch" type="button" role="switch" aria-checked="false" id="stDeep"><span class="tr"></span></button></div>
+        <div class="srow"><span class="lbl">Период при запуске</span><div class="seg solid" id="stPer"><button class="chip" type="button" data-v="last">Как в прошлый раз</button><button class="chip" type="button" data-v="24h">24 часа</button><button class="chip" type="button" data-v="7d">7 дней</button><button class="chip" type="button" data-v="30d">30 дней</button><button class="chip" type="button" data-v="all">Всё время</button></div></div>
+      </section>
+      <section><h3>Сохранённые результаты</h3>
+        <div class="srow"><span class="stcache" id="stCache"></span><button class="btn slim" id="stCacheClr" type="button">Очистить</button></div>
+      </section>
+      <section><h3>Программа</h3>
+        <div class="srow"><span class="lbl">Язык</span><div class="seg solid" id="stLang"><button class="chip" type="button" data-v="ru">Русский</button><button class="chip" type="button" data-v="en">English</button></div></div>
+        <div class="srow"><span class="lbl">Проверять обновления при запуске</span><button class="switch" type="button" role="switch" aria-checked="true" id="stUpd"><span class="tr"></span></button></div>
+      </section>
+    </div>
+    <div class="foot"><button class="btn ghostbtn" id="stReset" type="button">Сбросить все настройки</button><span class="grow"></span><button class="btn primary" id="stDone" type="button">Готово</button></div>
   </div>
 </div>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
@@ -2960,6 +3449,12 @@ Object.assign(EN, {"Субтитры": "Captions", "Любые": "Any", "Ест�
 Object.assign(EN, {"Чат на видео": "Chat on video", "Пример": "Example", "Как добавить": "How to add", "Поверх видео": "On the video", "Угол": "Corner", "Положение": "Position", "Слева по центру": "Middle left", "Справа по центру": "Middle right", "Слева сверху": "Top left", "Справа сверху": "Top right", "Слева снизу": "Bottom left", "Справа снизу": "Bottom right", "Размер": "Size", "Высота": "Height", "Фон": "Background", "Плотность фона": "Background density", "Сбросить": "Reset", "Готово": "Done", "Настроить чат: размер, фон, положение": "Chat settings: size, background, position"});
 Object.assign(EN, {"Чат трансляции": "Stream chat", "Справа": "Right", "Слева": "Left", "Отдельным файлом": "Separate file", "Добавить к видео чат трансляции — каким он был в этот момент. Чат берётся из записи эфира.": "Add the stream chat to the video — as it was at that moment. The chat comes from the broadcast video."});
 Object.assign(EN, {"Эфир": "Live", "Записи": "Videos", "Клипы из": "Clips from the", "эфира": "stream", "Добавьте стримера — приложение будет держать в памяти последние минуты трансляции вместе со звуком, даже если там играет музыка. Случился момент — нажмите «Клип».": "Add a streamer — the app keeps the last minutes of the broadcast in memory with the sound, even when music is playing. When the moment happens, press “Clip”.", "Ник стримера или ссылка на канал": "Streamer name or channel link", "Следить за эфиром": "Watch the stream", "Держать в памяти": "Keep in memory", "2 мин": "2 min", "5 мин": "5 min", "10 мин": "10 min", "15 мин": "15 min", "Качество": "Quality", "Пока канал в списке, приложение смотрит эфир в фоне: трафик как при обычном просмотре, около 3 ГБ в час в 1080p. Рекламные вставки Twitch в клипы не попадают.": "While a channel is on the list, the app watches the stream in the background: traffic is like normal viewing, about 3 GB per hour in 1080p. Twitch ad breaks don’t end up in clips.", "Здесь появятся эфиры": "Streams will appear here", "Впишите стримера и нажмите «Следить за эфиром». Можно следить за четырьмя каналами сразу.": "Enter a streamer and press “Watch the stream”. You can watch four channels at once.", "трансляций": "of past streams", "Скачайте запись эфира целиком или вырежьте нужный кусок — даже у эфира, который ещё идёт. Видео качается прямо с Twitch.": "Download a whole broadcast or cut out the part you need — even from a stream that is still live. The video downloads straight from Twitch.", "Ник стримера или ссылка на запись (twitch.tv/videos/…)": "Streamer name or video link (twitch.tv/videos/…)", "Найти записи": "Find videos", "Показывать": "Show", "Трансляции": "Broadcasts", "Хайлайты": "Highlights", "Загруженные": "Uploads", "Здесь появятся записи": "Videos will appear here", "Впишите стримера — покажем его последние трансляции. Или вставьте ссылку на конкретную запись.": "Enter a streamer to see their recent broadcasts. Or paste a link to a specific video.", "Клип из эфира": "Live clip", "Начало клипа": "Clip start", "Конец клипа": "Clip end", "сейчас": "now", "Начало:": "Start:", "Конец:": "End:", "Длина клипа:": "Clip length:", "Отмена": "Cancel", "Сохранить клип": "Save clip", "Узнаю длину записи и доступные качества…": "Checking the video length and available qualities…", "Отрезок": "Range", "Целиком": "Whole", "Начало отрезка": "Range start", "Конец отрезка": "Range end", "Скачать": "Download"});
+Object.assign(EN, {"Настройки": "Settings", "Скрыть скачанные": "Hide downloaded", "Группы": "Groups", "Нет": "None", "По часам": "By hour", "По дням": "By day", "По неделям": "By week",
+  "Поиск по названию записи": "Search by video title", "Сначала": "First", "Новые": "New", "Популярные": "Popular", "Длинные": "Long", "Длина": "Length", "Любая": "Any", "от 1 ч": "1 h+", "от 3 ч": "3 h+", "от 6 ч": "6 h+",
+  "Загрузки": "Downloads", "Папка загрузок": "Download folder", "Изменить": "Change", "Качество клипов": "Clip quality", "Скачивать одновременно": "Simultaneous downloads", "Больше — быстрее, если интернет быстрый": "More is faster on a fast connection",
+  "Имя файла": "File name", "Нажмите на поле ниже, чтобы добавить его": "Click a field below to add it", "стример": "streamer", "название": "title", "дата": "date", "категория": "category", "просмотры": "views", "автор клипа": "clip author", "как было": "default",
+  "Звук, когда всё скачалось": "Sound when everything is downloaded", "Глубокий поиск включён сразу": "Deep search on by default", "Период при запуске": "Period at startup", "Как в прошлый раз": "Same as last time", "24 часа": "24 hours", "7 дней": "7 days", "30 дней": "30 days", "Всё время": "All time",
+  "Сохранённые результаты": "Saved results", "Очистить": "Clear", "Программа": "App", "Язык": "Language", "Проверять обновления при запуске": "Check for updates at startup", "Сбросить все настройки": "Reset all settings", "Готово": "Done"});
 function tr(s) {
   if (!s || !/[А-Яа-яЁё]/.test(s)) return s;
   const t = s.trim();
@@ -2997,6 +3492,7 @@ const LOC = window.CS_LANG === "en" ? "en-US" : "ru-RU";
 if (new URLSearchParams(location.search).get("glass") === "1") { document.documentElement.classList.add("glass-os"); document.body.classList.add("glass-os"); }
 const $ = (id) => document.getElementById(id);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const EN2 = window.CS_LANG === "en", tt = (ru, en) => (EN2 ? en : ru);
 
 async function api(path, body) {
   const opt = { headers: { "X-Token": T, "Content-Type": "application/json" } };
@@ -3100,7 +3596,8 @@ function plural(n, f) { const a = n % 100, b = a % 10; return a > 10 && a < 20 ?
 
 const S = {
   period: { kind: "preset", key: "7d" },
-  rows: [], shown: 0, sort: { key: "views", desc: true },
+  rows: [], all: [], byId: new Map(), gen: 0, shown: 0, sorts: [{ k: "views", d: -1, g: "exact" }], hideDone: false,
+  prefs: { soundDone: true, autoUpdate: true, deepDefault: false, periodDefault: "last", parallel: 1, nameTpl: "{streamer} - {title}" },
   selected: new Set(), catId: "", catName: "",
   job: null, downloads: new Map(), dlJob: null, link: null, dir: "",
 };
@@ -3449,8 +3946,9 @@ const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&
 function showAlert(t) { $("alert").innerHTML = t ? `<div class="alert">${esc(t)}</div>` : ""; }
 function setBusy(b) { $("go").disabled = b; $("stop").hidden = !b; $("sorts").classList.toggle("locked", b); $("resReset").hidden = b; }
 
-async function startSearch() {
+async function startSearch(opts) {
   if ($("go").disabled) return;
+  const nocache = !!(opts && opts.nocache === true);
   showAlert("");
   commitLogin(); commitCreator(); commitCat(); $("sug").hidden = true;
   const logins = S.logins.slice(), login = logins.join(", "), cats = S.cats.map((c) => ({ name: c.name, id: c.id })), creators = S.creators.slice();
@@ -3459,11 +3957,11 @@ async function startSearch() {
   const body = {
     login, categories: cats, creators,
     words: $("words").value, min_views: parseInt($("minViews").value, 10) || 0,
-    pages: 10, deep: $("deep").getAttribute("aria-checked") === "true", captions: S.cc || "",
+    pages: 10, deep: $("deep").getAttribute("aria-checked") === "true", captions: S.cc || "", nocache,
     start: start ? start.toISOString() : null, end: end ? end.toISOString() : null,
   };
   api("/api/settings", { last: { login, cats: S.cats.slice(), creators, words: $("words").value, period: serPeriod(), cc: S.cc || "" } });
-  setBusy(true); S.selected.clear(); S.rows = []; S.multi = logins.length > 1; paintSel(); stopPreview();
+  setBusy(true); S.selected.clear(); S.rows = []; S.all = []; S.byId = new Map(); S.gen++; CCQ.want.clear(); paintHideDl(); S.multi = logins.length > 1; paintSel(); stopPreview();
   S.lastSearch = { logins, cats: S.cats.slice() };
   $("resHead").hidden = false; moveGlide($("sorts")); $("resTitle").textContent = "Ищу…"; $("resStatus").textContent = "Подключаюсь к Twitch";
   $("more").hidden = true; showSearching(); const t0 = Date.now();
@@ -3503,21 +4001,25 @@ function updSearching(p, t0) {
 }
 function fail(msg) { if (/Нет связи|Сервер ClipSearch/.test(String(msg))) checkLink(); setBusy(false); showAlert(msg); $("resHead").hidden = true; $("list").innerHTML = ""; drawChart(); }
 function done(res) {
-  S.rows = res.rows.map((r) => ({ ...r, ts: new Date(r.created) }));
+  S.all = res.rows.map((r) => ({ ...r, ts: new Date(r.created), cc: r.cc == null ? null : !!r.cc, dl: null }));
+  S.byId = new Map(S.all.map((r) => [r.id, r])); S.res = res;
+  S.rows = viewRows();
   const ls = S.lastSearch || { logins: [] };
   const known = {}; (ls.cats || []).forEach((c) => { if (c.art) known[c.name.toLowerCase()] = c.art; });
   const rcats = (res.categories || []).map((c) => ({ id: c.id, name: c.name, art: c.art || known[String(c.name).toLowerCase()] || "" }));
   api("/api/history", { logins: ls.logins, categories: rcats })
     .then((r) => { if (r && r.history) S.history = r.history; }).catch(() => {});
   if (rcats.length) { setCats(rcats); paintedCats = new Set(rcats.map((c) => c.name)); paintCats(); }
-  const n = S.rows.length;
-  $("resTitle").textContent = n ? `Найдено ${n.toLocaleString(LOC)} ${plural(n, ["клип", "клипа", "клипов"])}` : "Ничего не найдено";
+  const n = S.all.length;
+  paintResTitle();
   let st = `${periodText()}. Просмотрено клипов: ${res.info.scanned.toLocaleString(LOC)}.`;
   if (res.info.truncated) st += " Часть клипов не просмотрена: сузьте период или включите глубокий поиск.";
   if (res.info.captions) st += res.info.captions === "yes" ? " Только клипы с субтитрами." : " Только клипы без субтитров.";
   if (res.info.cc_unknown) st += ` У ${res.info.cc_unknown.toLocaleString(LOC)} клипов Twitch не ответил про субтитры — они не показаны.`;
   $("resStatus").textContent = st;
-  sortRows(); S.shown = 0; $("list").innerHTML = ""; renderMore(); drawChart(); moveGlide($("sorts"));
+  paintCached(res.info);
+  sortRows(); S.shown = 0; $("list").innerHTML = ""; renderMore(); drawChart(); paintSorts();
+  refreshDone(true);
   if (!n) $("list").innerHTML = `<div class="empty"><div class="big"><svg class="i" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5M8.5 11h5"/></svg></div><h3>Ничего не нашлось</h3><p>Расширьте период, уберите часть слов или включите глубокий поиск.</p></div>`;
 }
 $("go").addEventListener("click", startSearch);
@@ -3525,8 +4027,8 @@ $("reset").addEventListener("click", () => {
   if ($("go").disabled) return;
   ["login", "cat", "words", "creator", "minViews"].forEach((id) => { $(id).value = ""; $(id).dispatchEvent(new Event("input")); });
   $("sug").hidden = true; setLogins(""); setCats([]); setCreators([]);
-  $("deep").setAttribute("aria-checked", "false"); setCc("");
-  S.period = { kind: "preset", key: "7d" }; paintPeriod(); closePop(); showAlert("");
+  $("deep").setAttribute("aria-checked", S.prefs.deepDefault ? "true" : "false"); setCc("");
+  S.period = { kind: "preset", key: ["24h", "7d", "30d", "all"].includes(S.prefs.periodDefault) ? S.prefs.periodDefault : "7d" }; paintPeriod(); closePop(); showAlert("");
   api("/api/settings", { last: { login: "", cats: [], creators: [], words: "", period: serPeriod() } });
   $("login").focus();
 });
@@ -3540,21 +4042,72 @@ function loadPeriod(p) {
   else if (p.kind === "last") S.period = p;
 }
 
-function sortRows() {
-  const { key, desc } = S.sort, k = { views: (r) => r.views, date: (r) => r.ts, dur: (r) => r.duration, title: (r) => r.title.toLowerCase() }[key];
-  S.rows.sort((a, b) => (k(a) < k(b) ? -1 : k(a) > k(b) ? 1 : 0) * (desc ? -1 : 1));
+const SORT_N = { views: tt("Просмотры", "Views"), date: tt("Дата", "Date"), dur: tt("Длительность", "Duration"), title: tt("Название", "Title") };
+const G_N = { hour: tt("По часам", "By hour"), day: tt("По дням", "By day"), week: tt("По неделям", "By week") };
+const SORT_DIR = {
+  views: [tt("Сначала больше просмотров", "Most views first"), tt("Сначала меньше просмотров", "Fewest views first")],
+  date: [tt("Сначала новые", "Newest first"), tt("Сначала старые", "Oldest first")],
+  dur: [tt("Сначала длинные", "Longest first"), tt("Сначала короткие", "Shortest first")],
+  title: [tt("От Я до А", "Z to A"), tt("От А до Я", "A to Z")],
+};
+const CARET = '<svg class="i" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>';
+function gStart(ts, g) {
+  const d = new Date(ts);
+  if (g === "hour") { d.setMinutes(0, 0, 0); return d.getTime(); }
+  d.setHours(0, 0, 0, 0);
+  if (g === "week") d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+  return d.getTime();
 }
-document.querySelectorAll("#sorts .chip").forEach((b) => b.addEventListener("click", () => {
-  if ($("sorts").classList.contains("locked")) {
-    b.classList.remove("shake"); void b.offsetWidth; b.classList.add("shake");
-    b.addEventListener("animationend", () => b.classList.remove("shake"), { once: true });
-    toast("Дождитесь окончания поиска"); return;
-  }
-  const key = b.dataset.s;
-  S.sort = { key, desc: S.sort.key === key ? !S.sort.desc : key !== "title" };
-  document.querySelectorAll("#sorts .chip").forEach((x) => { x.classList.toggle("on", x === b); x.textContent = x.textContent.replace(/ [↑↓]$/, ""); });
-  b.textContent += S.sort.desc ? " ↓" : " ↑";
-  moveGlide($("sorts"));
+function grouping() { const l = S.sorts[0]; return l && l.k === "date" && l.g && l.g !== "exact" ? l.g : null; }
+function sortVal(r, l) {
+  if (l.k === "date") return l.g && l.g !== "exact" ? gStart(r.ts, l.g) : r.ts.getTime();
+  if (l.k === "views") return r.views;
+  if (l.k === "dur") return r.duration;
+  return r.title.toLowerCase();
+}
+function sortRows() {
+  const lv = S.sorts, g = grouping();
+  S.rows.forEach((r) => { r._gk = g ? gStart(r.ts, g) : null; });
+  S.rows.sort((a, b) => {
+    for (const l of lv) {
+      const x = sortVal(a, l), y = sortVal(b, l);
+      if (x !== y) { const c = l.k === "title" ? String(x).localeCompare(String(y), LOC) : (x < y ? -1 : 1); if (c) return c * l.d; }
+    }
+    return b.ts - a.ts || (a.id < b.id ? -1 : 1);
+  });
+  S.gcount = new Map();
+  if (g) S.rows.forEach((r) => S.gcount.set(r._gk, (S.gcount.get(r._gk) || 0) + 1));
+}
+function gLabel(k, g) {
+  const d = new Date(k), y = d.getFullYear() !== new Date().getFullYear() ? "numeric" : undefined;
+  const hm = (x) => x.toLocaleTimeString(LOC, { hour: "2-digit", minute: "2-digit" });
+  if (g === "hour") return d.toLocaleDateString(LOC, { day: "numeric", month: "long", year: y }) + ", " + hm(d) + "–" + hm(new Date(k + 3600e3));
+  if (g === "week") { const e = new Date(k); e.setDate(e.getDate() + 6); return d.toLocaleDateString(LOC, { day: "numeric", month: "short" }) + " – " + e.toLocaleDateString(LOC, { day: "numeric", month: "short", year: y }); }
+  return d.toLocaleDateString(LOC, { weekday: "long", day: "numeric", month: "long", year: y });
+}
+function ghead(k, g) {
+  const n = S.gcount.get(k) || 0, el = document.createElement("div"); el.className = "ghead";
+  el.innerHTML = `<b>${esc(gLabel(k, g))}</b><span>· ${n.toLocaleString(LOC)} ${esc(tt(plural(n, ["клип", "клипа", "клипов"]), n === 1 ? "clip" : "clips"))}</span>`;
+  return el;
+}
+function paintSorts() {
+  const l0 = S.sorts[0];
+  document.querySelectorAll("#sorts .chip[data-s]").forEach((x) => {
+    const on = x.dataset.s === l0.k;
+    x.classList.toggle("on", on);
+    x.textContent = (on && l0.k === "date" && G_N[l0.g] ? G_N[l0.g] : SORT_N[x.dataset.s]) + (on ? (l0.d < 0 ? " ↓" : " ↑") : "");
+  });
+  const gs = $("gSeg"); gs.hidden = l0.k !== "date";
+  gs.querySelectorAll(".chip").forEach((c) => c.classList.toggle("on", c.dataset.g === (l0.g || "exact")));
+  const used = new Set(S.sorts.map((l) => l.k));
+  $("sortThen").innerHTML = S.sorts.slice(1).map((l, i) => `<span class="then-l">${esc(tt("затем", "then"))}</span><button class="chip thenp" type="button" data-l="${i + 1}" title="${esc(SORT_DIR[l.k][l.d < 0 ? 0 : 1])}">${esc(SORT_N[l.k])} ${l.d < 0 ? "↓" : "↑"}${CARET}</button>`).join("") +
+    (S.sorts.length < 3 && used.size < 4 ? `<button class="chip addl" type="button" data-add="1" title="${esc(tt("Сортировать ещё по одному признаку внутри первого", "Sort by one more field within the first"))}">+ ${esc(S.sorts.length > 1 ? tt("ещё уровень", "one more") : tt("затем по…", "then by…"))}</button>` : "");
+  requestAnimationFrame(() => { moveGlide($("sorts")); });
+}
+function saveSorts() { api("/api/settings", { sort: S.sorts }).catch(() => {}); }
+function applySort() {
+  paintSorts(); saveSorts();
+  if (!S.rows.length) return;
   const before = new Map();
   document.querySelectorAll("#list .clip").forEach((el) => before.set(el.dataset.id, el.getBoundingClientRect().top));
   sortRows(); S.shown = 0; $("list").innerHTML = ""; renderMore(false);
@@ -3570,7 +4123,139 @@ document.querySelectorAll("#sorts .chip").forEach((b) => b.addEventListener("cli
       el.addEventListener("transitionend", () => { el.style.transition = ""; }, { once: true });
     }));
   });
-}));
+}
+function sortLocked(b) {
+  if (!$("sorts").classList.contains("locked")) return false;
+  b.classList.remove("shake"); void b.offsetWidth; b.classList.add("shake");
+  b.addEventListener("animationend", () => b.classList.remove("shake"), { once: true });
+  toast("Дождитесь окончания поиска"); return true;
+}
+const defDir = (k) => (k === "title" ? 1 : -1);
+function addLevel(btn) {
+  const used = new Set(S.sorts.map((l) => l.k)), r = btn.getBoundingClientRect();
+  btn.classList.add("open");
+  openMenu([{ head: tt("Затем сортировать по", "Then sort by") }].concat(["views", "date", "dur", "title"].filter((k) => !used.has(k)).map((k) => ({
+    label: SORT_N[k], sub: SORT_DIR[k][0], run: () => {
+      S.sorts.push({ k, d: defDir(k), g: "exact" });
+      const l0 = S.sorts[0];
+      if (l0.k === "date" && (!l0.g || l0.g === "exact")) { l0.g = "day"; toast(tt("Дата теперь группируется по дням — внутри каждого дня работает следующий уровень", "Dates are now grouped by day — the next level sorts within each day")); }
+      applySort();
+    },
+  }))), r.left, r.bottom + 6, { below: true, anchorTop: r.top, onClose: () => btn.classList.remove("open") });
+}
+function levelMenu(i, btn) {
+  const l = S.sorts[i], used = new Set(S.sorts.filter((_, j) => j !== i).map((x) => x.k)), r = btn.getBoundingClientRect();
+  btn.classList.add("open");
+  openMenu([{ head: tt("Затем по", "Then by") }].concat(["views", "date", "dur", "title"].filter((k) => !used.has(k)).map((k) => ({
+    label: SORT_N[k], checkable: true, checked: l.k === k, run: () => { if (l.k !== k) { l.k = k; l.d = defDir(k); l.g = "exact"; applySort(); } },
+  })), [{ sep: true },
+    { label: SORT_DIR[l.k][0], checkable: true, checked: l.d < 0, run: () => { l.d = -1; applySort(); } },
+    { label: SORT_DIR[l.k][1], checkable: true, checked: l.d > 0, run: () => { l.d = 1; applySort(); } },
+    { sep: true },
+    { label: tt("Убрать этот уровень", "Remove this level"), run: () => { S.sorts.splice(i, 1); applySort(); } }]),
+  r.left, r.bottom + 6, { below: true, anchorTop: r.top, onClose: () => btn.classList.remove("open") });
+}
+$("sorts").addEventListener("click", (e) => {
+  const b = e.target.closest(".chip"); if (!b) return;
+  if (sortLocked(b)) return;
+  if (b.dataset.s) {
+    const k = b.dataset.s, l0 = S.sorts[0];
+    if (l0.k === k) l0.d = -l0.d;
+    else {
+      const g = k === "date" ? (S.sorts.length > 1 ? "day" : (S.lastG || "exact")) : "exact";
+      S.sorts = [{ k, d: defDir(k), g }].concat(S.sorts.slice(1).filter((x) => x.k !== k));
+    }
+    applySort(); return;
+  }
+  if (b.dataset.add) { addLevel(b); return; }
+  if (b.dataset.l) levelMenu(+b.dataset.l, b);
+});
+$("gSeg").addEventListener("click", (e) => {
+  const c = e.target.closest(".chip"); if (!c || sortLocked(c)) return;
+  const l0 = S.sorts[0]; if (l0.k !== "date" || l0.g === c.dataset.g) return;
+  l0.g = c.dataset.g; S.lastG = l0.g; applySort();
+});
+
+function viewRows() { return S.hideDone ? S.all.filter((r) => !r.dl) : S.all.slice(); }
+function paintResTitle() {
+  const n = S.all.length, hid = S.hideDone ? S.all.filter((r) => r.dl).length : 0;
+  $("resTitle").textContent = n ? `Найдено ${n.toLocaleString(LOC)} ${plural(n, ["клип", "клипа", "клипов"])}` + (hid ? tt(` · скрыто скачанных: ${hid}`, ` · ${hid} downloaded hidden`) : "") : "Ничего не найдено";
+}
+function paintHideDl() {
+  const k = S.all.filter((r) => r.dl).length, b = $("hideDl");
+  b.hidden = !k && !S.hideDone;
+  b.setAttribute("aria-checked", S.hideDone ? "true" : "false");
+  $("hideDlT").textContent = tt("Скрыть скачанные", "Hide downloaded") + (k ? ` (${k})` : "");
+}
+function refilter() {
+  S.rows = viewRows();
+  const keep = new Set(S.rows.map((r) => r.id));
+  [...S.selected].forEach((id) => { if (!keep.has(id)) S.selected.delete(id); });
+  sortRows(); S.shown = 0; S.kf = -1; $("list").innerHTML = ""; renderMore(false); paintSel(); drawChart(); paintResTitle(); paintHideDl();
+  if (S.all.length && !S.rows.length) $("list").innerHTML = `<div class="empty"><h3>${esc(tt("Все найденные клипы уже скачаны", "All found clips are already downloaded"))}</h3><p>${esc(tt("Выключите «Скрыть скачанные», чтобы увидеть их.", "Turn off “Hide downloaded” to see them."))}</p></div>`;
+}
+$("hideDl").addEventListener("click", () => {
+  if ($("go").disabled) { toast("Дождитесь окончания поиска"); return; }
+  S.hideDone = !S.hideDone; api("/api/settings", { hide_done: S.hideDone }).catch(() => {}); refilter();
+});
+function paintCached(info) {
+  const box = $("resStatus2"); box.innerHTML = "";
+  if (!info || !info.cachedAt) return;
+  const part = info.cachedN < info.scanned;
+  const t = document.createElement("span"); t.className = "status"; t.style.flex = "none";
+  const when = Date.now() - info.cachedAt < 60000 ? tt("только что", "just now") : ago(info.cachedAt);
+  t.textContent = part ? tt(`Часть клипов из сохранённого (${when}).`, `Some clips are from saved results (${when}).`) : tt(`Из сохранённого, ${when}.`, `From saved results, ${when}.`);
+  t.title = tt("Повторный поиск за 12 часов берётся из сохранённого — так быстрее. Просмотры могут немного отставать.", "Repeated searches within 12 hours use saved results — it’s faster. View counts may lag a little.");
+  const b = document.createElement("button"); b.type = "button"; b.className = "linkbtn rfr"; b.textContent = tt("Обновить", "Refresh");
+  b.addEventListener("click", () => startSearch({ nocache: true }));
+  t.appendChild(b);
+  $("resStatus").appendChild(document.createTextNode(" ")); $("resStatus").appendChild(t);
+}
+
+const CCQ = { want: new Set(), busy: false };
+function needCc(rows) {
+  rows.forEach((r) => { if (r.cc == null && !r._ccA) { r._ccA = 1; CCQ.want.add(r.id); } });
+  pumpCc();
+}
+async function pumpCc() {
+  if (CCQ.busy || !CCQ.want.size) return; CCQ.busy = true;
+  try {
+    while (CCQ.want.size) {
+      const ids = [...CCQ.want].slice(0, 150), gen = S.gen; ids.forEach((i) => CCQ.want.delete(i));
+      const r = await api("/api/captions", { ids }).catch(() => null);
+      if (gen !== S.gen) continue;
+      if (!r || !r.cc) { ids.forEach((id) => { const x = S.byId.get(id); if (x) x._ccA = 0; }); break; }
+      ids.forEach((id) => { const x = S.byId.get(id); if (x && r.cc[id] != null) { x.cc = !!r.cc[id]; if (x.cc) paintBadges(x); } });
+    }
+  } finally { CCQ.busy = false; }
+}
+const OKI = '<svg class="i" viewBox="0 0 24 24"><path d="m5 12 5 5 9-10"/></svg>';
+function badgesHtml(r) {
+  return (r.dl ? `<button class="dlb" type="button" data-a="open" title="${esc(tt("Открыть скачанный файл", "Open the downloaded file"))}">${OKI}${esc(tt("Скачан", "Downloaded"))}</button>` : "") + (r.cc ? '<span class="ccb">CC</span>' : "");
+}
+function paintBadges(r) {
+  const el = document.querySelector(`#list .clip[data-id="${CSS.escape(r.id)}"] .bdg`);
+  if (el) el.innerHTML = badgesHtml(r);
+}
+let doneAt = 0, doneBusy = false;
+async function refreshDone(force) {
+  if (doneBusy || (!S.all.length && !VD.items.length)) return;
+  if (!force && Date.now() - doneAt < 4000) return;
+  doneAt = Date.now(); doneBusy = true;
+  try {
+    const r = await api("/api/downloaded", { clips: S.all.map((x) => x.id), vods: VD.items.map((x) => x.id) }).catch(() => null);
+    if (!r || r.error) return;
+    S.all.forEach((x) => { const p = (r.clips || {})[x.id] || null; if (x.dl !== p) { x.dl = p; paintBadges(x); } });
+    VD.items.forEach((v) => { const p = (r.vods || {})[v.id] || null; if (v.dl !== p) { v.dl = p; paintVodBadge(v); } });
+    paintHideDl(); paintResTitle();
+  } finally { doneBusy = false; }
+}
+addEventListener("focus", () => refreshDone(false));
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshDone(false); });
+async function openDone(path, after) {
+  const r = await api("/api/openpath", { path }).catch(() => ({ error: "нет связи" }));
+  if (r && r.error) { toast(tt("Файла уже нет на компьютере — отметка снята", "The file is no longer on your computer — the mark was removed")); after && after(); refreshDone(true); }
+}
 function ago(d) {
   const m = Math.max(0, Math.round((Date.now() - d) / 60000));
   if (m < 60) return `${m} мин назад`;
@@ -3595,7 +4280,7 @@ function clipEl(r, i) {
   const thumb = (r.thumb ? `<img src="${esc(r.thumb)}" alt="" loading="lazy">` : "") + `<button class="playov" data-a="watch" aria-label="Смотреть"><span>${IC.play}</span></button>`;
   el.innerHTML =
     `<button class="tick" aria-label="Выбрать клип">${IC.ok}</button>` +
-    `<div class="thumb">${thumb}<span class="dur">${mmss(r.duration)}</span></div>` +
+    `<div class="thumb">${thumb}<span class="bdg">${badgesHtml(r)}</span><span class="dur">${mmss(r.duration)}</span></div>` +
     `<div><h4>${esc(r.title)}</h4><div class="meta">` +
     (S.multi && r.broadcaster ? `<span title="Стример">${IC.tv}${esc(r.broadcaster)}</span>` : "") +
     `<span title="Автор клипа">${IC.user}${esc(r.creator || "неизвестно")}</span>` + (r.game ? `<span>${IC.game}${esc(r.game)}</span>` : "") +
@@ -3607,12 +4292,15 @@ function clipEl(r, i) {
 function renderMore(anim) {
   const list = $("list"), start = S.shown, end = Math.min(S.rows.length, S.shown + 40);
   const frag = document.createDocumentFragment();
+  const g = grouping();
   for (let i = S.shown; i < end; i++) {
+    if (g && (i === 0 || S.rows[i - 1]._gk !== S.rows[i]._gk)) frag.appendChild(ghead(S.rows[i]._gk, g));
     const el = clipEl(S.rows[i], i);
     if (anim !== false) { el.classList.add("enter"); el.style.setProperty("--d", Math.min(i - start, 12) * 0.035 + "s"); el.addEventListener("animationend", () => el.classList.remove("enter"), { once: true }); }
     frag.appendChild(el);
   }
   list.appendChild(frag); S.shown = end; $("more").hidden = S.shown >= S.rows.length;
+  needCc(S.rows.slice(start, end));
   $("more").textContent = `Показать ещё (${S.rows.length - S.shown})`;
 }
 $("more").addEventListener("click", () => renderMore());
@@ -3625,6 +4313,7 @@ $("list").addEventListener("click", (e) => {
     if (a.dataset.a === "watch") openPlayer(r);
     if (a.dataset.a === "copy") copyText(r.url, "Ссылка скопирована");
     if (a.dataset.a === "dl") startDownload([r]);
+    if (a.dataset.a === "open" && r.dl) openDone(r.dl, () => { r.dl = null; paintBadges(r); paintHideDl(); });
     return;
   }
   toggleSel(+el.dataset.i); setKFocus(+el.dataset.i, false);
@@ -3658,7 +4347,7 @@ $("bCsv").addEventListener("click", async () => {
 
 async function startDownload(rows, quality) {
   if (!rows.length) return;
-  const r = await api("/api/download", { quality: quality || S.quality || "1080", items: rows.map((x) => ({ id: x.id, title: x.title, broadcaster: x.broadcaster, start: x.start ?? null, end: x.end ?? null })) });
+  const r = await api("/api/download", { quality: quality || S.quality || "1080", items: rows.map((x) => ({ id: x.id, title: x.title, broadcaster: x.broadcaster, created: x.created, game: x.game, views: x.views, creator: x.creator, start: x.start ?? null, end: x.end ?? null })) });
   if (r.error) { showAlert(r.error); return; }
   if (r.keys && r.keys.length) S.dlFresh = r.keys[r.keys.length - 1];
   const busy = [...S.downloads.values()].some((x) => x.state === "wait" || x.state === "load");
@@ -3672,7 +4361,7 @@ function applyDownloads(items) {
   let finished = 0;
   items.forEach((it) => { const o = before.get(it.key); if (it.state === "done" && o && o.state !== "done") finished++; });
   paintDl();
-  if (finished) loadFolder();
+  if (finished) { loadFolder(); refreshDone(true); }
   return finished;
 }
 async function pollDownloads() {
@@ -3683,14 +4372,26 @@ async function pollDownloads() {
       if (!r || !r.items) { await sleep(1000); continue; }
       applyDownloads(r.items);
       const active = r.items.some((x) => x.state === "wait" || x.state === "load");
+      if (active) S.dlSeenActive = true;
       if (!active) {
         const done = r.items.filter((x) => x.state === "done").length, fail = r.items.filter((x) => x.state === "fail").length;
-        if (S.dlNotify !== r.items.length + ":" + done + ":" + fail) { S.dlNotify = r.items.length + ":" + done + ":" + fail; if (fail) toast(`Не удалось скачать: ${fail}`); else if (done) toast("Загрузки завершены"); }
+        if (S.dlNotify !== r.items.length + ":" + done + ":" + fail) { S.dlNotify = r.items.length + ":" + done + ":" + fail; if (fail) toast(`Не удалось скачать: ${fail}`); else if (done) toast("Загрузки завершены"); if (done && S.dlSeenActive && S.prefs.soundDone) chime(); S.dlSeenActive = false; }
         break;
       }
       await sleep(450);
     }
   } finally { dlPolling = false; }
+}
+function chime() {
+  try {
+    const C = new (window.AudioContext || window.webkitAudioContext)(), t = C.currentTime + 0.02;
+    [[784, 0], [1046.5, 0.12], [1318.5, 0.24]].forEach(([f, d]) => {
+      const o = C.createOscillator(), g = C.createGain(); o.type = "sine"; o.frequency.value = f;
+      g.gain.setValueAtTime(0.0001, t + d); g.gain.exponentialRampToValueAtTime(0.12, t + d + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + d + 0.8);
+      o.connect(g); g.connect(C.destination); o.start(t + d); o.stop(t + d + 0.85);
+    });
+    setTimeout(() => C.close(), 1600);
+  } catch (e) {}
 }
 async function dlAction(kind, key) {
   const r = await api("/api/download/" + kind, { key }).catch(() => null);
@@ -3945,9 +4646,70 @@ $("rpSend").addEventListener("click", async () => {
   if (r.error) { toast(r.error); return; }
   hideVeil($("reportVeil")); $("rpText").value = ""; toast("Спасибо! Отчёт отправлен.");
 });
-document.querySelectorAll(".langsw button").forEach((b) => {
-  b.classList.toggle("on", b.dataset.lang === window.CS_LANG);
-  b.addEventListener("click", async () => { if (b.dataset.lang === window.CS_LANG) return; await api("/api/settings", { lang: b.dataset.lang }); location.reload(); });
+$("brand").addEventListener("click", () => api("/api/openurl", { url: "https://clip-search.com" + (EN2 ? "/en/" : "/") }).then((r) => r && r.error && toast(r.error)));
+const NAME_DEF = "{streamer} - {title}";
+function segOn(id, v) { $(id).querySelectorAll(".chip").forEach((c) => c.classList.toggle("on", c.dataset.v === String(v))); }
+function swOn(id, v) { $(id).setAttribute("aria-checked", v ? "true" : "false"); }
+function nameExample(tpl) {
+  const f = { streamer: "shroud", title: tt("Невероятный эйс", "Insane ace"), date: new Date().toISOString().slice(0, 10), game: "Counter-Strike", views: "15230", creator: "clipper" };
+  let o = tpl.replace(/\{(streamer|title|date|game|views|creator)\}/g, (_, k) => f[k]).replace(/[\\/:*?"<>|]+/g, " ");
+  o = o.replace(/\s*(?:-\s*){2,}/g, " - ").replace(/^[\s\-_.·]+|[\s\-_.·]+$/g, "").replace(/\s+/g, " ");
+  return (o || "shroud") + " - AbCdEf123.mp4";
+}
+function paintName() {
+  const v = $("stName").value, ok = /\{(streamer|title|date|game|views|creator)\}/.test(v), ex = $("stNameEx");
+  ex.classList.toggle("w", !ok);
+  ex.innerHTML = ok ? esc(tt("Например: ", "Example: ")) + "<b>" + esc(nameExample(v)) + "</b><br>" + esc(tt("В конце имени всегда добавляется номер клипа (у записей — номер записи): по нему приложение узнаёт, что уже скачано.", "The clip ID (or video ID) is always added at the end: that’s how the app knows what’s already downloaded."))
+    : esc(tt("Добавьте хотя бы одно поле, например «название».", "Add at least one field, e.g. “title”."));
+  return ok;
+}
+let nameT = 0;
+function saveName() { clearTimeout(nameT); nameT = setTimeout(() => { if (paintName()) { S.prefs.nameTpl = $("stName").value.trim(); api("/api/settings", { name_tpl: S.prefs.nameTpl }).catch(() => {}); } }, 450); }
+$("stName").addEventListener("input", saveName);
+$("stTok").addEventListener("click", (e) => {
+  const b = e.target.closest("button"); if (!b) return;
+  const inp = $("stName");
+  if (b.id === "stNameDef") inp.value = NAME_DEF;
+  else {
+    const t = b.dataset.t, a = inp.selectionStart ?? inp.value.length, z = inp.selectionEnd ?? a, v = inp.value;
+    const pre = v.slice(0, a), post = v.slice(z), sep1 = pre && !/[\s\-_(\[]$/.test(pre) ? " - " : "", sep2 = post && !/^[\s\-_)\]]/.test(post) ? " - " : "";
+    inp.value = pre + sep1 + t + sep2 + post; const c = (pre + sep1 + t).length; inp.focus(); inp.setSelectionRange(c, c);
+  }
+  saveName();
+});
+async function paintCache() {
+  const r = await api("/api/cache", {}).catch(() => null);
+  $("stCache").innerHTML = esc(tt("Найденные клипы хранятся 12 часов, чтобы повторный поиск шёл мгновенно, потом удаляются сами. Сейчас занято: ", "Found clips are kept for 12 hours so repeated searches are instant, then removed automatically. Used now: ")) + "<b>" + esc(fmtBytes(r && r.size != null ? r.size : 0)) + "</b>";
+}
+function openSettings() {
+  $("stDir").textContent = S.dir && S.dir.length > 52 ? "…" + S.dir.slice(-51) : (S.dir || ""); $("stDir").title = S.dir || "";
+  segOn("stQ", S.quality || "1080"); segOn("stPar", S.prefs.parallel || 1); segOn("stPer", S.prefs.periodDefault || "last"); segOn("stLang", window.CS_LANG);
+  swOn("stSound", S.prefs.soundDone); swOn("stDeep", S.prefs.deepDefault); swOn("stUpd", S.prefs.autoUpdate);
+  $("stName").value = S.prefs.nameTpl || NAME_DEF; paintName(); paintCache();
+  $("stReset").classList.remove("armed"); $("stReset").textContent = tt("Сбросить все настройки", "Reset all settings");
+  showVeil($("setVeil"));
+}
+const closeSettings = () => { if (isOpen($("setVeil"))) hideVeil($("setVeil")); };
+$("navSet").addEventListener("click", openSettings);
+$("stClose").addEventListener("click", closeSettings); $("stDone").addEventListener("click", closeSettings);
+$("setVeil").addEventListener("mousedown", (e) => { if (e.target === $("setVeil")) closeSettings(); });
+addEventListener("keydown", (e) => { if (e.key === "Escape" && isOpen($("setVeil")) && !menuEl) { closeSettings(); e.preventDefault(); e.stopPropagation(); } }, true);
+$("stDirBtn").addEventListener("click", async () => { await pickDir(); $("stDir").textContent = S.dir && S.dir.length > 52 ? "…" + S.dir.slice(-51) : (S.dir || ""); $("stDir").title = S.dir || ""; });
+$("stQ").addEventListener("click", (e) => { const c = e.target.closest(".chip"); if (!c) return; setQuality(c.dataset.v); segOn("stQ", c.dataset.v); });
+$("stPar").addEventListener("click", (e) => { const c = e.target.closest(".chip"); if (!c) return; S.prefs.parallel = +c.dataset.v; segOn("stPar", c.dataset.v); api("/api/settings", { parallel: S.prefs.parallel }).catch(() => {}); });
+$("stPer").addEventListener("click", (e) => { const c = e.target.closest(".chip"); if (!c) return; S.prefs.periodDefault = c.dataset.v; segOn("stPer", c.dataset.v); api("/api/settings", { period_default: c.dataset.v }).catch(() => {}); });
+$("stLang").addEventListener("click", async (e) => { const c = e.target.closest(".chip"); if (!c || c.dataset.v === window.CS_LANG) return; segOn("stLang", c.dataset.v); await api("/api/settings", { lang: c.dataset.v }); location.reload(); });
+[["stSound", "soundDone", "sound_done"], ["stDeep", "deepDefault", "deep_default"], ["stUpd", "autoUpdate", "auto_update"]].forEach(([id, k, key]) => $(id).addEventListener("click", () => {
+  S.prefs[k] = !S.prefs[k]; swOn(id, S.prefs[k]); api("/api/settings", { [key]: S.prefs[k] }).catch(() => {});
+  if (k === "soundDone" && S.prefs[k]) chime();
+  if (k === "deepDefault" && !$("go").disabled) $("deep").setAttribute("aria-checked", S.prefs[k] ? "true" : "false");
+}));
+$("stCacheClr").addEventListener("click", async () => { const r = await api("/api/cache", { clear: true }).catch(() => null); paintCache(); if (r && !r.error) toast(tt("Сохранённые результаты удалены", "Saved results cleared")); });
+let resetT = 0;
+$("stReset").addEventListener("click", async () => {
+  const b = $("stReset");
+  if (!b.classList.contains("armed")) { b.classList.add("armed"); b.textContent = tt("Точно сбросить? Нажмите ещё раз", "Sure? Click again"); clearTimeout(resetT); resetT = setTimeout(() => { b.classList.remove("armed"); b.textContent = tt("Сбросить все настройки", "Reset all settings"); }, 4000); return; }
+  clearTimeout(resetT); await api("/api/settings", { reset: true }).catch(() => {}); location.reload();
 });
 $("navQuit").addEventListener("click", async () => {
   if (window.cs) { window.cs.win("close"); return; }
@@ -4315,7 +5077,7 @@ function clearResults() {
   list.classList.add("leaving"); head.classList.add("leaving");
   setTimeout(() => {
     list.classList.remove("leaving"); head.classList.remove("leaving");
-    S.rows = []; S.shown = 0; S.kf = -1; S.selected.clear(); paintSel();
+    S.rows = []; S.all = []; S.byId = new Map(); S.gen++; CCQ.want.clear(); paintHideDl(); S.shown = 0; S.kf = -1; S.selected.clear(); paintSel();
     head.hidden = true; $("more").hidden = true; showAlert("");
     list.innerHTML = FIRST_EMPTY; drawChart();
   }, 260);
@@ -4370,14 +5132,67 @@ function rangeSlider(tl, onMove) {
   return { st, set(len, a, b, min) { st.len = Math.max(1, len); st.min = min || 1; st.a = Math.max(0, Math.min(a, st.len)); st.b = Math.max(st.a, Math.min(b, st.len)); paint(); } };
 }
 
-const VD = { q: "", login: "", type: "archive", after: "", items: [], cur: null, info: null, mode: "cut", quality: "1080", sl: null };
+const VD = { q: "", login: "", type: "archive", after: "", items: [], cur: null, info: null, mode: "cut", quality: "1080", sl: null,
+  sort: "time", find: "", min: 0, cat: "", chap: {}, user: null, gen: 0 };
+const MUTEI = '<svg class="i" viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9zM17 9l4 6M21 9l-4 6"/></svg>';
+const hm = (sec) => { sec = Math.max(0, Math.round(sec)); return Math.floor(sec / 3600) + ":" + String(Math.floor(sec % 3600 / 60)).padStart(2, "0"); };
+function shortDur(sec) { sec = Math.round(sec); if (sec < 60) return sec + tt(" с", " s"); const m = Math.round(sec / 60); return m < 60 ? m + tt(" мин", " min") : hm(sec); }
+function vodBadges(v) {
+  return v.dl ? `<button class="dlb" type="button" data-a="open" title="${esc(tt("Открыть скачанный файл", "Open the downloaded file"))}">${OKI}${esc(tt("Скачана", "Downloaded"))}</button>` : "";
+}
+function chapHtml(c) {
+  if (!c || !c.chapters || !c.chapters.length) return "";
+  const ch = c.chapters;
+  if (ch.length === 1) return `<span><b>${esc(ch[0][2])}</b></span>`;
+  const end = ch[ch.length - 1][0] + ch[ch.length - 1][1], f = end >= 3600 ? hm : clock;
+  const shown = ch.slice(0, 5).map(([st, du, nm]) => `<span><b>${esc(nm)}</b>${f(st)}–${f(st + du)}</span>`).join("");
+  return shown + (ch.length > 5 ? `<span class="more">${esc(tt(`и ещё ${ch.length - 5}`, `+${ch.length - 5} more`))}</span>` : "");
+}
+function paintVodBadge(v) {
+  const n = document.querySelector(`#vodList .vd[data-id="${CSS.escape(v.id)}"] .bdg`); if (n) n.innerHTML = vodBadges(v);
+}
+function vodCats(v) { const c = VD.chap[v.id]; return c ? [...new Set((c.chapters || []).map((x) => x[2]).concat(c.game ? [c.game] : []))] : []; }
+function vodView() {
+  const q = VD.find.trim().toLowerCase();
+  let list = VD.items.filter((v) => (!q || (v.title || "").toLowerCase().includes(q)) && (!VD.min || v.duration >= VD.min) && (!VD.cat || vodCats(v).includes(VD.cat)));
+  if (VD.sort === "long") list = list.slice().sort((a, b) => b.duration - a.duration);
+  return list;
+}
+function renderVods(anim) {
+  const box = $("vodList");
+  box.querySelectorAll(".vd, .vdempty").forEach((n) => n.remove());
+  const list = vodView();
+  list.forEach((v, i) => { const n = vodRow(v, anim ? i : 0); if (!anim) n.style.animationDuration = ".25s"; box.appendChild(n); });
+  if (VD.items.length && !list.length) box.insertAdjacentHTML("beforeend", `<div class="vdempty">${esc(tt("Под эти условия записей не нашлось. Измените поиск, длину или категорию.", "No videos match. Change the search, length or category."))}</div>`);
+}
+function paintVodCats() {
+  const cnt = new Map();
+  VD.items.forEach((v) => vodCats(v).forEach((c) => cnt.set(c, (cnt.get(c) || 0) + 1)));
+  const top = [...cnt.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12), box = $("vodCats");
+  if (VD.cat && !cnt.has(VD.cat)) VD.cat = "";
+  box.hidden = top.length < 2;
+  box.innerHTML = `<span class="lbl">${esc(tt("Категория", "Category"))}</span><button class="chip${VD.cat ? "" : " on"}" type="button" data-c="">${esc(tt("Все", "All"))}</button>` +
+    top.map(([c, n]) => `<button class="chip${VD.cat === c ? " on" : ""}" type="button" data-c="${esc(c)}">${esc(c)}<i>${n}</i></button>`).join("");
+}
+async function loadChapters(items) {
+  const ids = items.map((v) => v.id).filter((id) => !VD.chap[id]), gen = VD.gen;
+  for (let i = 0; i < ids.length; i += 50) {
+    const r = await api("/api/vod/chapters", { ids: ids.slice(i, i + 50) }).catch(() => null);
+    if (gen !== VD.gen || !r || !r.items) return;
+    Object.assign(VD.chap, r.items);
+    Object.keys(r.items).forEach((id) => { const n = document.querySelector(`#vodList .vd[data-id="${CSS.escape(id)}"] .vchap`); if (n) n.innerHTML = chapHtml(r.items[id]); });
+    paintVodCats();
+  }
+}
 function vodRow(v, i) {
   const n = document.createElement("div"); n.className = "vd"; n.style.setProperty("--d", Math.min(i, 10) * 0.04 + "s"); n.dataset.id = v.id;
   const d = v.created ? new Date(v.created) : null;
-  const muted = v.muted && v.muted.length ? `<span class="w">${esc(t2("Twitch заглушил звук в части записи", "Twitch muted part of the audio"))}</span>` : "";
-  n.innerHTML = `<div class="vth">${v.thumb ? `<img src="${esc(v.thumb)}" alt="" loading="lazy">` : ""}<span class="dur">${clock(v.duration)}</span>${v.recording ? `<span class="tag">${esc(t2("ИДЁТ ЭФИР", "LIVE NOW"))}</span>` : ""}</div>
+  const mt = (v.muted || []).reduce((a, m) => a + (m[1] || 0), 0);
+  const muted = mt ? `<span class="mutb" title="${esc(t2("Twitch заглушил звук в части записи, всего ", "Twitch muted part of the audio, total ") + shortDur(mt))}">${MUTEI}${esc(shortDur(mt))}</span>` : "";
+  n.innerHTML = `<div class="vth">${v.thumb ? `<img src="${esc(v.thumb)}" alt="" loading="lazy">` : ""}<span class="bdg">${vodBadges(v)}</span><span class="dur">${clock(v.duration)}</span>${v.recording ? `<span class="tag">${esc(t2("ИДЁТ ЭФИР", "LIVE NOW"))}</span>` : ""}${muted}</div>
     <div><h4>${esc(v.title || t2("Без названия", "Untitled"))}</h4>
-    <div class="meta">${d ? `<span>${d.toLocaleString(LOC, { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })}</span>` : ""}<span>${v.views.toLocaleString(LOC)} ${esc(t2(plural(v.views, ["просмотр", "просмотра", "просмотров"]), v.views === 1 ? "view" : "views"))}</span>${muted}</div>
+    <div class="meta">${d ? `<span>${d.toLocaleString(LOC, { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })}</span>` : ""}<span>${v.views.toLocaleString(LOC)} ${esc(t2(plural(v.views, ["просмотр", "просмотра", "просмотров"]), v.views === 1 ? "view" : "views"))}</span></div>
+    <div class="vchap">${chapHtml(VD.chap[v.id])}</div>
     <div class="vacts"><button class="btn slim primary" type="button" data-a="cut"><svg class="i" viewBox="0 0 24 24"><circle cx="6" cy="6" r="2.6"/><circle cx="6" cy="18" r="2.6"/><path d="M8.2 7.6 20 18M8.2 16.4 20 6"/></svg>${esc(t2("Вырезать отрезок", "Cut a range"))}</button>
     <button class="btn slim" type="button" data-a="full"><svg class="i" viewBox="0 0 24 24"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14"/></svg>${esc(t2("Скачать целиком", "Download whole"))}</button>
     <button class="btn slim" type="button" data-a="tw">${esc(t2("На Twitch", "On Twitch"))}</button></div></div>`;
@@ -4388,30 +5203,46 @@ async function vodSearch(more) {
   const q = $("vodQ").value.trim(); if (!q) { $("vodQ").focus(); return; }
   if (/twitch\.tv\/(?:[^/]+\/)?videos?\/\d+|^v?\d{6,}$/i.test(q)) { openVod({ id: q, title: "", login: "" }); return; }
   if (!more) {
-    VD.after = ""; VD.items = [];
+    VD.after = ""; VD.items = []; VD.gen++; VD.cat = ""; $("vodTools").hidden = true;
     $("vodList").innerHTML = '<div class="searching"><div class="lens-scene"><div class="tile"><i></i></div><div class="tile"><i></i></div><div class="tile"><i></i></div>' + LENS + '</div>' +
       `<h3>${esc(t2("Ищем записи", "Looking for videos"))}<span class="dots"><span>.</span><span>.</span><span>.</span></span></h3><div class="numbers">${esc(t2("Спрашиваю у Twitch трансляции стримера", "Asking Twitch for the broadcasts of"))} ${esc(q)}</div><div class="hatch run"><i class="vsbar" style="width:4%"></i></div></div>`;
     requestAnimationFrame(() => requestAnimationFrame(() => { const b = $("vodList").querySelector(".vsbar"); if (b) b.style.width = "88%"; }));
   }
   vodAlert(""); $("vodGo").disabled = true; $("vodMore").disabled = true;
-  const r = await api("/api/vods", { login: q, type: VD.type, after: more ? VD.after : "" }).catch(() => ({ error: t2("Нет связи с программой", "No connection to the app") }));
+  const r = await api("/api/vods", { login: q, type: VD.type, sort: VD.sort === "views" ? "views" : "time", after: more ? VD.after : "" }).catch(() => ({ error: t2("Нет связи с программой", "No connection to the app") }));
   $("vodGo").disabled = false; $("vodMore").disabled = false;
   if (r.error) { vodAlert(r.error); if (!more) $("vodList").innerHTML = ""; return; }
   if (!more) {
     $("vodList").innerHTML = `<div class="vd-user">${r.user.avatar ? `<img src="${esc(r.user.avatar)}" alt="">` : ""}<b>${esc(r.user.name)}</b></div>`;
     if (!r.items.length) $("vodList").insertAdjacentHTML("beforeend", `<div class="empty"><h3>${esc(t2("Записей нет", "No videos"))}</h3><p>${esc(t2("Стример не сохраняет трансляции или удалил их. Записи на Twitch хранятся от 7 до 60 дней.", "The streamer doesn’t keep broadcasts or deleted them. Twitch keeps videos for 7 to 60 days."))}</p></div>`);
   }
-  const start = VD.items.length; VD.items.push(...r.items); VD.after = r.after;
-  r.items.forEach((v, i) => $("vodList").appendChild(vodRow(v, start + i)));
+  r.items.forEach((v) => { v.dl = null; });
+  VD.items.push(...r.items); VD.after = r.after;
+  $("vodTools").hidden = !VD.items.length;
+  renderVods(!more); paintVodCats();
   $("vodMore").hidden = !VD.after;
+  loadChapters(r.items); refreshDone(true);
 }
 $("vodGo").addEventListener("click", () => vodSearch(false));
 $("vodQ").addEventListener("keydown", (e) => { if (e.key === "Enter") vodSearch(false); });
 $("vodMore").addEventListener("click", () => vodSearch(true));
 $("vodType").addEventListener("click", (e) => { const c = e.target.closest(".chip"); if (!c) return; VD.type = c.dataset.t; document.querySelectorAll("#vodType .chip").forEach((x) => x.classList.toggle("on", x === c)); if ($("vodQ").value.trim()) vodSearch(false); });
+let vfT = 0;
+$("vodFind").addEventListener("input", () => { clearTimeout(vfT); vfT = setTimeout(() => { VD.find = $("vodFind").value; renderVods(false); }, 120); });
+$("vodFind").addEventListener("keydown", (e) => { if (e.key === "Escape" && $("vodFind").value) { $("vodFind").value = ""; VD.find = ""; renderVods(false); e.stopPropagation(); } });
+$("vodSort").addEventListener("click", (e) => {
+  const c = e.target.closest(".chip"); if (!c || c.dataset.v === VD.sort) return;
+  const was = VD.sort; VD.sort = c.dataset.v; document.querySelectorAll("#vodSort .chip").forEach((x) => x.classList.toggle("on", x === c));
+  api("/api/settings", { vod_sort: VD.sort }).catch(() => {});
+  const server = (x) => (x === "views" ? "views" : "time");
+  if (server(was) !== server(VD.sort) && VD.items.length) vodSearch(false); else renderVods(false);
+});
+$("vodMin").addEventListener("click", (e) => { const c = e.target.closest(".chip"); if (!c) return; VD.min = +c.dataset.v; document.querySelectorAll("#vodMin .chip").forEach((x) => x.classList.toggle("on", x === c)); renderVods(false); });
+$("vodCats").addEventListener("click", (e) => { const c = e.target.closest(".chip"); if (!c) return; VD.cat = c.dataset.c; paintVodCats(); renderVods(false); });
 $("vodList").addEventListener("click", (e) => {
   const b = e.target.closest("[data-a]"); if (!b) return;
   const v = VD.items.find((x) => x.id === b.closest(".vd").dataset.id); if (!v) return;
+  if (b.dataset.a === "open") { if (v.dl) openDone(v.dl, () => { v.dl = null; paintVodBadge(v); }); return; }
   if (b.dataset.a === "tw") api("/api/openurl", { url: v.url });
   else openVod(v, b.dataset.a);
 });
@@ -4632,7 +5463,32 @@ async function openVod(v, mode) {
   const quick = r.recording ? [[60, t2("Последняя минута", "Last minute")], [300, t2("5 мин", "5 min")], [900, t2("15 мин", "15 min")]] : [];
   $("vdQuick").innerHTML = quick.map(([s, l]) => `<button class="chip" type="button" data-last="${s}">${esc(l)}</button>`).join("");
   vdPaintQ(); vdPaint();
+  paintVdChap(v.id, len);
+  if (!VD.chap[v.id]) {
+    const rr = await api("/api/vod/chapters", { ids: [v.id] }).catch(() => null);
+    if (rr && rr.items) Object.assign(VD.chap, rr.items);
+    if (VD.cur && VD.cur.id === v.id) paintVdChap(v.id, len);
+  }
 }
+function paintVdChap(id, len) {
+  const c = VD.chap[id], box = $("vdChap"), ch = (c && c.chapters ? c.chapters : []).filter((x) => x[0] < len - 1);
+  box.hidden = ch.length < 2;
+  box.innerHTML = ch.length < 2 ? "" : `<span class="lbl">${esc(tt("Категории:", "Categories:"))}</span>` + ch.map(([st, du, nm]) => {
+    const en = du > 0 ? Math.min(len, st + du) : len;
+    const f = len >= 3600 ? hm : clock;
+    return `<button class="chip" type="button" data-st="${st}" data-en="${en}" title="${esc(tt("Выделить этот отрезок", "Select this part"))}">${esc(nm)}<i>${f(st)}–${f(en)}</i></button>`;
+  }).join("");
+}
+function vdGame() {
+  const c = VD.cur && VD.chap[VD.cur.id]; if (!c) return "";
+  const a = VD.mode === "full" ? 0 : VD.sl.st.a, hit = (c.chapters || []).find(([st, du]) => a >= st && (du <= 0 || a < st + du));
+  return (hit && hit[2]) || c.game || "";
+}
+$("vdChap").addEventListener("click", (e) => {
+  const c = e.target.closest("[data-st]"); if (!c || !VD.info) return;
+  VD.mode = "cut"; VD.sl.set(VD.info.length, +c.dataset.st, Math.max(+c.dataset.st + 1, +c.dataset.en), 1);
+  $("vdChap").querySelectorAll(".chip").forEach((x) => x.classList.toggle("on", x === c)); vdPaint();
+});
 $("vdQuick").addEventListener("click", (e) => { const c = e.target.closest("[data-last]"); if (!c || !VD.info) return; const len = VD.info.length; VD.sl.set(len, Math.max(0, len - +c.dataset.last), len, 1); vdPaint(); });
 $("vdMode").addEventListener("click", (e) => { const c = e.target.closest(".chip"); if (!c) return; VD.mode = c.dataset.m; vdPaint(); });
 $("vdQ").addEventListener("click", (e) => { const c = e.target.closest(".chip"); if (!c) return; VD.quality = c.dataset.q; vdPaintQ(); vdPaint(); });
@@ -4647,7 +5503,8 @@ $("vodVeil").addEventListener("mousedown", (e) => { if (e.target === $("vodVeil"
 $("vdGo").addEventListener("click", async () => {
   const v = VD.cur, info = VD.info; if (!v || !info) return;
   const full = VD.mode === "full", st = VD.sl.st;
-  const body = { id: info.id, title: info.title || v.title, login: info.login || v.login, quality: VD.quality, chat: chatParam(), userId: info.userId || "" };
+  const body = { id: info.id, title: info.title || v.title, login: info.login || v.login, quality: VD.quality, chat: chatParam(), userId: info.userId || "",
+    name: info.name || v.name || "", created: info.created || v.created || "", views: info.views ?? v.views ?? null, game: vdGame() };
   if (!full) { body.start = Math.round(st.a * 10) / 10; body.end = Math.round(st.b * 10) / 10; }
   $("vdGo").disabled = true;
   const r = await api("/api/vod/download", body).catch(() => ({ error: t2("Нет связи с программой", "No connection to the app") }));
@@ -4666,6 +5523,15 @@ addEventListener("keydown", (e) => {
   requestAnimationFrame(() => requestAnimationFrame(() => document.body.classList.remove("noanim")));
   const st = await api("/api/state");
   S.quality = st.quality || "1080"; paintQuality();
+  if (st.prefs) {
+    Object.assign(S.prefs, st.prefs);
+    if (Array.isArray(st.prefs.sort) && st.prefs.sort.length) S.sorts = st.prefs.sort.filter((l) => SORT_N[l.k]).map((l) => ({ k: l.k, d: l.d > 0 ? 1 : -1, g: l.g || "exact" })).slice(0, 3);
+    if (!S.sorts.length) S.sorts = [{ k: "views", d: -1, g: "exact" }];
+    S.hideDone = !!st.prefs.hideDone; VD.sort = ["time", "views", "long"].includes(st.prefs.vodSort) ? st.prefs.vodSort : "time";
+    document.querySelectorAll("#vodSort .chip").forEach((c) => c.classList.toggle("on", c.dataset.v === VD.sort));
+    if (st.prefs.deepDefault) $("deep").setAttribute("aria-checked", "true");
+  }
+  paintSorts();
   if (st.chat) { S.chat = { on: !!st.chat.on, style: { ...CHAT_DEF, ...(st.chat.style || {}) } }; paintChat(); }
   S.dir = st.downloadDir; S.history = st.history || {}; S.updateSeen = st.updateSeen || ""; paintDir(); checkLink();
   const l = st.last || {};
@@ -4675,9 +5541,10 @@ addEventListener("keydown", (e) => {
   setCc(l.cc === "yes" || l.cc === "no" ? l.cc : "");
   paintedCats = new Set(S.cats.map((c) => c.name)); paintedCr = new Set(S.creators); paintCats(); paintCreators();
   ["login", "words"].forEach((id) => $(id).dispatchEvent(new Event("input")));
-  loadPeriod(l.period); paintPeriod(); loadFolder();
+  if (["24h", "7d", "30d", "all"].includes(S.prefs.periodDefault)) S.period = { kind: "preset", key: S.prefs.periodDefault }; else loadPeriod(l.period);
+  paintPeriod(); loadFolder();
   $("goHint").textContent = "Enter запускает поиск. В полях стримера и автора Enter сначала добавляет ник в список";
-  setTimeout(() => checkUpdate(false), 2500);
+  if (S.prefs.autoUpdate !== false) setTimeout(() => checkUpdate(false), 2500);
   pollDownloads();
 })();
 })();
@@ -4761,6 +5628,19 @@ class DownloadQueue:
         self.cv = threading.Condition()
         self.seq = 0
         self.thread = None
+        self.running = 0
+
+    def limit(self):
+        try:
+            return min(4, max(1, int(self.ctx.cfg.get("parallel") or 1)))
+        except (TypeError, ValueError):
+            return 1
+
+    def spawn(self):
+        want = min(self.limit(), sum(1 for x in self.items if x["state"] == "wait") + self.running)
+        while self.running < want:
+            self.running += 1
+            threading.Thread(target=self.work, daemon=True).start()
 
     def view(self):
         with self.cv:
@@ -4780,13 +5660,13 @@ class DownloadQueue:
                     "key": key, "id": str(i["id"]), "title": str(i.get("title", "")) + tail, "pct": 0, "state": "wait",
                     "path": "", "error": "", "quality": quality,
                     "_src": {"id": str(i["id"]), "title": str(i.get("title", "")), "broadcaster": str(i.get("broadcaster", "")),
+                             "created": str(i.get("created", "")), "game": str(i.get("game", "")), "views": i.get("views"),
+                             "creator": str(i.get("creator", "")),
                              "start": float(st) if cut else None, "end": float(en) if cut else None, "chat": chat},
                     "note": "", "kind": "clip",
                 })
                 keys.append(key)
-            if self.thread is None or not self.thread.is_alive():
-                self.thread = threading.Thread(target=self.work, daemon=True)
-                self.thread.start()
+            self.spawn()
             self.cv.notify_all()
         return keys
 
@@ -4796,9 +5676,7 @@ class DownloadQueue:
             key = f"{kind}-{self.seq}"
             self.items.append({"key": key, "id": key, "title": title, "pct": 0, "state": "wait", "path": "", "error": "",
                                "quality": src.get("quality", ""), "kind": kind, "note": "", "_kind": kind, "_src": src})
-            if self.thread is None or not self.thread.is_alive():
-                self.thread = threading.Thread(target=self.work, daemon=True)
-                self.thread.start()
+            self.spawn()
             self.cv.notify_all()
         return key
 
@@ -4820,9 +5698,7 @@ class DownloadQueue:
             it = self.find(key)
             if it and it["state"] in ("fail", "stop"):
                 it.update(state="wait", pct=0, error="", path="")
-                if self.thread is None or not self.thread.is_alive():
-                    self.thread = threading.Thread(target=self.work, daemon=True)
-                    self.thread.start()
+                self.spawn()
                 self.cv.notify_all()
 
     def clear(self):
@@ -4832,9 +5708,9 @@ class DownloadQueue:
     def work(self):
         while True:
             with self.cv:
-                it = next((x for x in self.items if x["state"] == "wait"), None)
+                it = next((x for x in self.items if x["state"] == "wait"), None) if self.running <= self.limit() else None
                 if it is None:
-                    self.thread = None
+                    self.running -= 1
                     return
                 it["state"], it["pct"], it["_ev"] = "load", 0, threading.Event()
             src, ev = it["_src"], it["_ev"]
@@ -4851,11 +5727,13 @@ class DownloadQueue:
                 else:
                     chat = chat_style(src.get("chat"))
                     p1 = (lambda p, it=it: it.__setitem__("pct", p * 40 // 100)) if chat else prog
-                    path = download_clip({"id": src["id"], "title": src["title"], "broadcaster": src["broadcaster"]}, folder,
+                    path = download_clip({"id": src["id"], "title": src["title"], "broadcaster": src["broadcaster"], "created": src.get("created"),
+                                          "game": src.get("game"), "views": src.get("views"), "creator": src.get("creator")}, folder,
                                          progress=p1, cancel=ev, start=src["start"], end=src["end"], quality=it["quality"])
                     if chat:
                         it["note"] = clip_chat(path, src, chat, ev, lambda p, it=it: it.__setitem__("pct", 40 + p * 60 // 100))
                 it.update(path=path, pct=100, state="done")
+                DONE.add(("v:" if kind == "vod" else "c:") + str(src["id"]), path)
             except Cancelled:
                 it.update(state="stop", pct=0)
             except Exception as e:
@@ -4883,6 +5761,13 @@ class Ctx:
         self.quit = threading.Event()
         self.lock = threading.Lock()
         self.dlq = DownloadQueue(self)
+        CACHE.path = os.path.join(data_dir(), "cache", "search.json.gz")
+        DONE.path = os.path.join(data_dir(), "downloaded.json")
+        try:
+            os.makedirs(os.path.dirname(CACHE.path), exist_ok=True)
+        except OSError:
+            pass
+        NAME_TPL["v"] = str(self.cfg.get("name_tpl") or NAME_TPL_DEFAULT)
 
     def twitch(self):
         if getattr(self, "_tw", None) is None:
@@ -5047,6 +5932,40 @@ def update_history(ctx, b):
     save_config(ctx.cfg)
     return h
 
+def dir_size(path):
+    total = 0
+    for root, _, files in os.walk(path):
+        for n in files:
+            try:
+                total += os.path.getsize(os.path.join(root, n))
+            except OSError:
+                pass
+    return total
+
+
+def cache_info():
+    img = os.path.join(data_dir(), "cache", "img")
+    return {"size": CACHE.size() + dir_size(img), "ttl": CACHE_TTL // 3600}
+
+
+def cache_clear():
+    import shutil
+    CACHE.clear()
+    with CHAPTERS_LOCK:
+        CHAPTERS.clear()
+    img = os.path.join(data_dir(), "cache", "img")
+    for n in os.listdir(img) if os.path.isdir(img) else []:
+        try:
+            os.remove(os.path.join(img, n))
+        except OSError:
+            pass
+    return cache_info()
+
+
+SETTING_KEYS = ("download_dir", "quality", "parallel", "name_tpl", "deep_default", "period_default", "sound_done", "auto_update",
+                "sort", "hide_done", "vod_sort")
+
+
 def folder_info(folder):
     files, total = [], 0
     try:
@@ -5124,6 +6043,17 @@ def make_handler(ctx):
                     "quality": cfg.get("quality", "1080"),
                     "chat": {"on": bool(cfg.get("chat_on")), "style": chat_style(cfg.get("chat_style") or cfg.get("chat_mode") or "overlay")},
                     "lang": LANG["code"],
+                    "prefs": {
+                        "parallel": DownloadQueue.limit(ctx.dlq),
+                        "nameTpl": NAME_TPL["v"],
+                        "deepDefault": bool(cfg.get("deep_default")),
+                        "periodDefault": str(cfg.get("period_default") or "last"),
+                        "soundDone": bool(cfg.get("sound_done", True)),
+                        "autoUpdate": bool(cfg.get("auto_update", True)),
+                        "sort": cfg.get("sort") if isinstance(cfg.get("sort"), list) else None,
+                        "hideDone": bool(cfg.get("hide_done")),
+                        "vodSort": str(cfg.get("vod_sort") or "time"),
+                    },
                 })
             if u.path == "/api/job":
                 job = ctx.jobs.get(urllib.parse.parse_qs(u.query).get("id", [""])[0])
@@ -5168,6 +6098,38 @@ def make_handler(ctx):
                     ctx.cfg["chat_on"] = bool(b["chat_on"])
                 if isinstance(b.get("chat_style"), dict):
                     ctx.cfg["chat_style"] = chat_style(b["chat_style"])
+                if "parallel" in b:
+                    try:
+                        ctx.cfg["parallel"] = min(4, max(1, int(b["parallel"])))
+                    except (TypeError, ValueError):
+                        pass
+                    with ctx.dlq.cv:
+                        ctx.dlq.spawn()
+                if "name_tpl" in b:
+                    t = re.sub(r"[\\/:*?\"<>|\r\n\t]+", " ", str(b["name_tpl"] or ""))[:120].strip()
+                    ctx.cfg["name_tpl"] = NAME_TPL["v"] = t if re.search(r"\{(streamer|title|date|game|views|creator)\}", t) else NAME_TPL_DEFAULT
+                if "deep_default" in b:
+                    ctx.cfg["deep_default"] = bool(b["deep_default"])
+                if "period_default" in b and re.fullmatch(r"last|1h|24h|7d|30d|all", str(b["period_default"])):
+                    ctx.cfg["period_default"] = str(b["period_default"])
+                for k in ("sound_done", "auto_update", "hide_done"):
+                    if k in b:
+                        ctx.cfg[k] = bool(b[k])
+                if isinstance(b.get("sort"), list):
+                    lv = []
+                    for x in b["sort"][:3]:
+                        if isinstance(x, dict) and x.get("k") in ("views", "date", "dur", "title"):
+                            lv.append({"k": x["k"], "d": 1 if x.get("d") == 1 else -1,
+                                       "g": x.get("g") if x.get("g") in ("hour", "day", "week", "exact") else "exact"})
+                    ctx.cfg["sort"] = lv or None
+                if b.get("vod_sort") in ("time", "views", "long"):
+                    ctx.cfg["vod_sort"] = b["vod_sort"]
+                if b.get("reset"):
+                    keep = {k: ctx.cfg[k] for k in ("history", "update_seen", "last") if k in ctx.cfg}
+                    ctx.cfg.clear()
+                    ctx.cfg.update(keep)
+                    NAME_TPL["v"] = NAME_TPL_DEFAULT
+                    LANG["code"] = system_lang()
                 save_config(ctx.cfg)
                 return {"ok": True, "downloadDir": ctx.download_dir()}
             if path == "/api/categories":
@@ -5214,12 +6176,23 @@ def make_handler(ctx):
                         w.writerow([r.get("title"), r.get("creator"), r.get("broadcaster"), r.get("game"),
                                     r.get("created"), r.get("views"), round(float(r.get("duration") or 0)), r.get("url")])
                 return {"path": p}
+            if path == "/api/captions":
+                ids = [str(x) for x in (b.get("ids") or [])[:400] if re.fullmatch(r"[A-Za-z0-9_-]{1,120}", str(x))]
+                return {"cc": clip_captions(ids) if ids else {}}
+            if path == "/api/downloaded":
+                c, v = DONE.lookup([str(x) for x in (b.get("clips") or [])[:5000]], [str(x) for x in (b.get("vods") or [])[:2000]],
+                                   ctx.download_dir())
+                return {"clips": c, "vods": v}
+            if path == "/api/cache":
+                if b.get("clear"):
+                    return cache_clear()
+                return cache_info()
             if path == "/api/pickfolder":
                 return {"path": pick_folder(ctx.download_dir())}
             if path == "/api/openurl":
                 url = str(b.get("url", ""))
                 host = urllib.parse.urlparse(url).hostname or ""
-                if url == TG_URL:
+                if url == TG_URL or url == SITE_URL or url.startswith(SITE_URL + "/"):
                     webbrowser.open(url)
                     return {"ok": True}
                 if not (host == "twitch.tv" or host.endswith(".twitch.tv")):
@@ -5262,6 +6235,21 @@ def make_handler(ctx):
                 elif sys.platform == "darwin":
                     subprocess.Popen(["open", p])
                 return {"ok": True}
+            if path == "/api/openpath":
+                p = os.path.realpath(str(b.get("path", "")))
+                if not os.path.isfile(p) or os.path.splitext(p)[1].lower() not in (".mp4", ".m4a", ".mov", ".mkv"):
+                    raise ValueError(L("Файл не найден: возможно, его переместили или удалили.", "File not found: it may have been moved or deleted."))
+                with DONE.lock:
+                    DONE._load()
+                    known = set(DONE.d.values())
+                root = os.path.realpath(ctx.download_dir())
+                if p not in {os.path.realpath(x) for x in known} and not p.startswith(root + os.sep):
+                    raise ValueError(L("Файл не найден.", "File not found."))
+                if sys.platform.startswith("win"):
+                    os.startfile(p)
+                elif sys.platform == "darwin":
+                    subprocess.Popen(["open", p])
+                return {"ok": True}
             if path == "/api/reveal":
                 p = str(b.get("path", "")) or ctx.download_dir()
                 os.makedirs(p if not os.path.splitext(p)[1] else os.path.dirname(p), exist_ok=True)
@@ -5276,7 +6264,8 @@ def make_handler(ctx):
                 if not login:
                     raise ValueError(L("Впишите ник стримера или ссылку на канал.", "Enter a streamer name or a channel link."))
                 u = tw.user(login)
-                params = {"user_id": u["id"], "type": str(b.get("type") or "archive"), "first": 20}
+                params = {"user_id": u["id"], "type": str(b.get("type") or "archive"), "first": 100,
+                          "sort": b.get("sort") if b.get("sort") in ("time", "views", "trending") else "time"}
                 if params["type"] not in ("archive", "highlight", "upload", "all"):
                     params["type"] = "archive"
                 if b.get("after"):
@@ -5304,6 +6293,9 @@ def make_handler(ctx):
                 v["length"] = round(sum(s["dur"] for s in pl["segs"]), 1)
                 v["recording"] = not pl["ended"]
                 return v
+            if path == "/api/vod/chapters":
+                ids = [str(x) for x in (b.get("ids") or [])[:100]]
+                return {"items": vod_chapters(ids)}
             if path == "/api/vod/download":
                 vid = parse_vod_id(b.get("id"))
                 if not vid:
@@ -5321,6 +6313,8 @@ def make_handler(ctx):
                 chat = chat_style(b.get("chat"))
                 key = ctx.dlq.add_task("vod", L("Запись: ", "Video: ") + title + part + (L(" + чат", " + chat") if chat else ""),
                                        {"id": vid, "title": title, "login": str(b.get("login") or ""), "start": st, "end": en, "quality": q,
+                                        "name": str(b.get("name") or "")[:60], "created": str(b.get("created") or "")[:30],
+                                        "game": str(b.get("game") or "")[:80], "views": b.get("views"),
                                         "chat": chat, "userId": re.sub(r"\D", "", str(b.get("userId") or ""))})
                 return {"key": key}
             raise ValueError("Неизвестная команда.")
@@ -5381,7 +6375,7 @@ def make_handler(ctx):
                     if not any(r["id"] == pick["id"] for r in resolved):
                         resolved.append({"id": pick["id"], "name": pick["name"], "art": pick.get("art", "")})
                 rows, info = search_clips(
-                    tw, login=logins, game_id=[c["id"] for c in resolved],
+                    tw, login=logins, use_cache=not b.get("nocache"), game_id=[c["id"] for c in resolved],
                     game_names={c["id"]: c["name"] for c in resolved},
                     progress=lambda t: setattr(job, "progress", t), cancel=job.cancel, **args,
                 )
