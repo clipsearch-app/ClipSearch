@@ -9,11 +9,12 @@ import threading
 import time
 import urllib.error
 import urllib.parse
+import http.client
 import urllib.request
 import webbrowser
 from datetime import datetime, timedelta, timezone
 
-VERSION = "1.1"
+VERSION = "1.2"
 
 if sys.platform == "darwin" and not os.environ.get("SSL_CERT_FILE"):
     try:
@@ -44,19 +45,13 @@ def L(ru, en):
     return en if LANG["code"] == "en" else ru
 
 
-RELEASE_NOTES = """- Записи трансляций: скачивайте их целиком или вырезайте нужный кусок, в том числе у эфира, который ещё идёт.
-- Чат трансляции на записях: включите переключатель — и к скачанной записи добавится чат, каким он был в тот момент. Сообщения плавно появляются по ходу видео. Размер, высоту, положение и фон можно настроить, а в окне настроек сразу видно, как это будет выглядеть. Можно поверх видео или отдельным файлом с прозрачным фоном.
-- Фильтр «Субтитры» в поиске: только клипы с субтитрами Twitch или только без них.
-- ClipSearch теперь есть для macOS: Apple Silicon (M1 и новее) и Intel, macOS 11 и новее.
-- Установщик для Windows ставит именно ту версию, которую вы скачали.
+RELEASE_NOTES = """- Поиск клипов работает в сетях, где провайдер замедляет зарубежные сайты: раньше там поиск долго грузился и заканчивался ошибкой «The read operation timed out».
+- Приложение быстрее получает данные от Twitch: ответы теперь приходят в сжатом виде.
 
 <!-- en -->
-### English
-- Broadcast videos: download them whole or cut out the part you need, even from a stream that is still live.
-- Stream chat on broadcast videos: turn on the switch and the chat is added to the downloaded video as it was at that moment, with messages smoothly appearing as it plays. Size, height, position and background are adjustable, with a live preview in the settings. On top of the video or as a separate file with a transparent background.
-- “Captions” filter in search: only clips with Twitch captions or only without them.
-- ClipSearch is now available for macOS: Apple Silicon (M1 and newer) and Intel, macOS 11 or later.
-- The Windows installer now installs exactly the version you downloaded."""
+- Clip search now works on networks where the provider slows down foreign sites: before, the search there loaded for a long time and ended with “The read operation timed out”.
+- The app gets data from Twitch faster: responses now arrive compressed.
+"""
 GITHUB_API = os.environ.get("CLIPS_GITHUB_API", "https://api.github.com")
 
 WORKER_URL = os.environ.get("CLIPS_WORKER_URL", "https://api.clip-search.com").rstrip("/")
@@ -213,18 +208,39 @@ def rfc3339(dt):
 def parse_time(s):
     return datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
 
+SMALL_PAGES = {"on": os.environ.get("CLIPS_SMALL_PAGES") == "1"}
+SMALL_FIRST = 50
+
+
+def read_body(r):
+    data = r.read()
+    if (r.headers.get("Content-Encoding") or "").lower() == "gzip":
+        import gzip
+        data = gzip.decompress(data)
+    return data
+
+
 class Twitch:
 
+    @staticmethod
+    def shrink(e):
+        if not SMALL_PAGES["on"]:
+            SMALL_PAGES["on"] = True
+            log(f"small pages on after {e!r}")
+
     def get(self, path, params, cancel=None):
-        url = API_BASE + path + "?" + urllib.parse.urlencode(params, doseq=True)
-        headers = {"X-ClipSearch": VERSION, "User-Agent": "ClipSearch/" + VERSION, "Accept": "application/json", "Accept-Language": LANG["code"]}
+        params = dict(params)
+        headers = {"X-ClipSearch": VERSION, "User-Agent": "ClipSearch/" + VERSION, "Accept": "application/json", "Accept-Language": LANG["code"], "Accept-Encoding": "gzip"}
         last = None
         for attempt in range(5):
             if cancel is not None and cancel.is_set():
                 raise Cancelled()
+            if SMALL_PAGES["on"] and int(params.get("first") or 0) > SMALL_FIRST:
+                params["first"] = SMALL_FIRST
+            url = API_BASE + path + "?" + urllib.parse.urlencode(params, doseq=True)
             try:
-                with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=30) as r:
-                    return json.load(r)
+                with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=20 if attempt == 0 and not SMALL_PAGES["on"] else 30) as r:
+                    return json.loads(read_body(r))
             except urllib.error.HTTPError as e:
                 try:
                     msg = str(json.load(e).get("message", "")).strip()
@@ -239,9 +255,11 @@ class Twitch:
                 raise TwitchError(f"Twitch ответил {e.code}. {msg}".strip())
             except urllib.error.URLError as e:
                 last = getattr(e, "reason", e)
+                self.shrink(e)
                 time.sleep(1 + attempt)
-            except (TimeoutError, OSError) as e:
+            except (TimeoutError, OSError, http.client.HTTPException) as e:
                 last = e
+                self.shrink(e)
                 time.sleep(1 + attempt)
         raise TwitchError(f"Нет связи с Twitch: {last}")
 
@@ -270,6 +288,8 @@ def check_link():
     try:
         with urllib.request.urlopen(req, timeout=8) as r:
             d = json.load(r)
+        if d.get("small"):
+            SMALL_PAGES["on"] = True
         if d.get("ok") and d.get("keys", True):
             return {"ok": True}
         return {"ok": False, "error": "Сервер ClipSearch пока не настроен."}
@@ -373,7 +393,8 @@ def search_clips(tw, login="", game_id="", words="", start=None, end=None, creat
             windows = [(None, None)]
         for wi, (lo, hi) in enumerate(windows):
             cursor = None
-            for page in range(max_pages):
+            taken = 0
+            while taken < max_pages * 100:
                 if cancel is not None and cancel.is_set():
                     raise Cancelled()
                 params = dict(base)
@@ -383,6 +404,7 @@ def search_clips(tw, login="", game_id="", words="", start=None, end=None, creat
                 if cursor:
                     params["after"] = cursor
                 r = tw.get("/clips", params, cancel)
+                taken += SMALL_FIRST if SMALL_PAGES["on"] else 100
                 data = r.get("data") or []
                 scanned += len(data)
                 for c in data:
@@ -405,7 +427,7 @@ def search_clips(tw, login="", game_id="", words="", start=None, end=None, creat
                     found.append(c)
                 cursor = (r.get("pagination") or {}).get("cursor")
                 if progress:
-                    inner = (wi + (1.0 if not cursor else min(1.0, (page + 1) / max_pages))) / len(windows)
+                    inner = (wi + (1.0 if not cursor else min(1.0, taken / (max_pages * 100)))) / len(windows)
                     progress({"scanned": scanned, "found": len(found), "step": wi + 1, "steps": len(windows),
                               "who": who, "ti": ti + 1, "tn": len(targets),
                               "frac": (ti + inner) / len(targets)})
