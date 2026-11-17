@@ -14,7 +14,7 @@ import urllib.request
 import webbrowser
 from datetime import datetime, timedelta, timezone
 
-VERSION = "1.2"
+VERSION = "1.3"
 
 if sys.platform == "darwin" and not os.environ.get("SSL_CERT_FILE"):
     try:
@@ -46,24 +46,16 @@ def L(ru, en):
     return en if LANG["code"] == "en" else ru
 
 
-RELEASE_NOTES = """- Значок «Скачан» на клипах, которые уже есть в папке загрузок: нажмите — откроется файл. Кнопка «Скрыть скачанные» убирает их из списка.
-- Значок CC на клипах с субтитрами.
-- Повторный поиск за 12 часов берётся из сохранённого и открывается почти мгновенно. Кнопка «Обновить» спрашивает Twitch заново.
-- Новое окно «Настройки»: папка, качество, сколько клипов качать одновременно (до 4), шаблон имени файла, звук по окончании загрузок, период и глубокий поиск по умолчанию, язык.
-- Записи: поиск по названию, сортировка (новые, популярные, длинные), фильтр по длине и по категории. На карточке видно, во что играл стример и когда, и сколько звука заглушил Twitch.
-- В окне скачивания записи можно одним нажатием выделить отрезок с нужной игрой.
-- Логотип слева вверху открывает сайт ClipSearch.
-- Поиск клипов работает в сетях, где провайдер замедляет зарубежные сайты: раньше там поиск долго грузился и заканчивался ошибкой «The read operation timed out».
+RELEASE_NOTES = """- Исправлен чат в записях трансляций: раньше он замирал на первых секундах, теперь двигается по ходу всего видео.
+- Программа открывается с первого раза. Если она уже запускается или ещё закрывается, повторное нажатие просто покажет окно.
+- 2K: клипы и записи со стримов в 2K (1440p) теперь можно скачать в 2K. Вариант появляется, только если 2K у видео действительно есть, а на таких клипах стоит значок «2K».
+- Раньше записи стримеров, которые ведут эфиры в 2K, скачивались максимум в 720p. Теперь доступно исходное качество.
 
 <!-- en -->
-- A “Downloaded” badge on clips that are already in your download folder: click it to open the file. “Hide downloaded” removes them from the list.
-- A CC badge on clips with captions.
-- Repeating a search within 12 hours uses saved results and opens almost instantly. “Refresh” asks Twitch again.
-- New Settings window: folder, quality, how many clips to download at once (up to 4), file name template, a sound when downloads finish, default period and deep search, language.
-- Videos: search by title, sorting (new, popular, long), filters by length and category. Each card shows what the streamer played and when, and how much audio Twitch muted.
-- In the video download window, one click selects the part with the game you need.
-- The logo in the top left opens the ClipSearch website.
-- Clip search now works on networks where the provider slows down foreign sites: before, the search there loaded for a long time and ended with “The read operation timed out”.
+- Fixed the chat in broadcast videos: it used to freeze on the first seconds, now it moves along the whole video.
+- The app opens on the first try. If it is still starting or closing, clicking again just shows the window.
+- 2K: clips and videos from 2K (1440p) streams can now be downloaded in 2K. The option appears only when the video really has 2K, and such clips get a “2K” badge.
+- Videos of streamers who broadcast in 2K used to download at 720p at most. Now the original quality is available.
 """
 GITHUB_API = os.environ.get("CLIPS_GITHUB_API", "https://api.github.com")
 
@@ -361,7 +353,7 @@ class ClipCache:
             with gzip.open(self.path, "rt", encoding="utf-8") as f:
                 d = json.load(f)
             self.iv = {k: v for k, v in (d.get("iv") or {}).items() if isinstance(v, list)}
-            self.cc = {k: v for k, v in (d.get("cc") or {}).items() if isinstance(v, list) and len(v) == 2}
+            self.cc = {k: v for k, v in (d.get("cc") or {}).items() if isinstance(v, list) and len(v) >= 2}
             self.prune()
         except Exception as e:
             log(f"cache load: {e!r}")
@@ -441,13 +433,22 @@ class ClipCache:
             now = time.time()
             return {i: self.cc[i][0] for i in ids if i in self.cc and now - self.cc[i][1] < CACHE_TTL}
 
-    def captions_put(self, d):
+    def captions_put(self, d, hq=None):
         with self.lock:
             self._load()
             now = time.time()
             for k, v in d.items():
-                self.cc[k] = [bool(v), now]
+                h = (hq or {}).get(k)
+                if h is None and k in self.cc and len(self.cc[k]) > 2:
+                    h = self.cc[k][2]
+                self.cc[k] = [bool(v), now] + ([int(h)] if h else [])
             self.dirty = True
+
+    def hq_get(self, ids):
+        with self.lock:
+            self._load()
+            now = time.time()
+            return {i: self.cc[i][2] for i in ids if i in self.cc and len(self.cc[i]) > 2 and now - self.cc[i][1] < CACHE_TTL}
 
     def size(self):
         try:
@@ -624,17 +625,23 @@ def vod_chapters(ids, cancel=None):
                     CHAPTERS[i] = (out[i], time.time(), 6 * 3600)
     return out
 
-def clip_captions(slugs, cancel=None, progress=None):
+def clip_captions(slugs, cancel=None, progress=None, hq_out=None):
     from concurrent.futures import ThreadPoolExecutor
     out = CACHE.captions_get(slugs)
-    slugs = [x for x in slugs if x not in out]
+    known_hq = CACHE.hq_get(slugs)
+    if hq_out is not None:
+        hq_out.update(known_hq)
+        slugs = [x for x in slugs if x not in out or x not in known_hq]
+    else:
+        slugs = [x for x in slugs if x not in out]
+    hq = {}
     batches = [slugs[i:i + 15] for i in range(0, len(slugs), 15)]
     done = [0]
     lock = threading.Lock()
     def one(part):
         if cancel is not None and cancel.is_set():
             return
-        q = "query { " + " ".join(f"c{j}: clip(slug: {json.dumps(sl)}) {{ hasCaptions }}" for j, sl in enumerate(part)) + " }"
+        q = "query { " + " ".join(f"c{j}: clip(slug: {json.dumps(sl)}) {{ hasCaptions videoQualities {{ quality }} }}" for j, sl in enumerate(part)) + " }"
         try:
             data = gql_post({"query": q}).get("data") or {}
         except Exception as e:
@@ -645,6 +652,12 @@ def clip_captions(slugs, cancel=None, progress=None):
                 c = data.get(f"c{j}")
                 if isinstance(c, dict) and isinstance(c.get("hasCaptions"), bool):
                     out[sl] = c["hasCaptions"]
+                    try:
+                        hs = [int(float(v.get("quality") or 0)) for v in (c.get("videoQualities") or [])]
+                    except (TypeError, ValueError):
+                        hs = []
+                    if hs:
+                        hq[sl] = max(hs)
             done[0] += len(part)
             if progress:
                 progress(done[0], len(slugs))
@@ -652,7 +665,9 @@ def clip_captions(slugs, cancel=None, progress=None):
         list(ex.map(one, batches))
     if cancel is not None and cancel.is_set():
         raise Cancelled()
-    CACHE.captions_put({k: v for k, v in out.items() if k in set(slugs)})
+    CACHE.captions_put({k: v for k, v in out.items() if k in set(slugs)}, hq)
+    if hq_out is not None:
+        hq_out.update(hq)
     return out
 
 def search_clips(tw, login="", game_id="", words="", start=None, end=None, creator="", min_views=0,
@@ -807,7 +822,18 @@ def search_clips(tw, login="", game_id="", words="", start=None, end=None, creat
     return rows, {"scanned": scanned, "truncated": truncated, "captions": captions if captions in ("yes", "no") else "", "cc_unknown": cc_unknown,
                   "cachedAt": int(cached_at * 1000) if cached_at else 0, "cachedN": cached_n}
 
-QUALITIES = ("1080", "720", "480")
+QUALITIES = ("1440", "1080", "720", "480")
+
+
+def nearest_height(heights, want):
+    hs = sorted({int(h) for h in heights if h}, reverse=True)
+    if not hs:
+        return None
+    try:
+        w = int(want)
+    except (TypeError, ValueError):
+        return hs[0]
+    return min(hs, key=lambda h: (abs(h - w), -h))
 
 def get_download_url(slug, preview=False, quality=None):
     body = json.dumps([{
@@ -822,8 +848,8 @@ def get_download_url(slug, preview=False, quality=None):
         qs = sorted(clip["videoQualities"], key=lambda q: (-float(q["quality"]), -(q.get("frameRate") or 0)))
         best = qs[0]
         if quality and not preview:
-            fit = [q for q in qs if float(q["quality"]) <= float(quality) + 1]
-            best = fit[0] if fit else qs[-1]
+            h = nearest_height([float(q["quality"]) for q in qs], quality)
+            best = next((q for q in qs if int(float(q["quality"])) == h), qs[0])
         if preview:
             light = [q for q in qs if 300 <= float(q["quality"]) <= 540]
             best = light[0] if light else qs[-1]
@@ -907,7 +933,7 @@ def download_clip(row, folder, progress=None, cancel=None, start=None, end=None,
     url, got = get_download_url(row["id"], quality=quality)
     cut = start is not None and end is not None and end > start
     tail = f" ({mmss(start)}-{mmss(end)})" if cut else ""
-    if quality and quality != "1080":
+    if int(float(got)) != 1080:
         tail += f" [{int(float(got))}p]"
     base = render_name(name_fields(row.get("broadcaster") or "", row.get("title") or "", row.get("created") or "", row.get("game") or "",
                                    row.get("views"), row.get("creator") or ""), row.get("broadcaster") or "clip")
@@ -1001,7 +1027,7 @@ TOKEN_QUERY = """query PlaybackAccessToken($login: String!, $isLive: Boolean!, $
   streamPlaybackAccessToken(channelName: $login, params: {platform: "web", playerBackend: "mediaplayer", playerType: $playerType}) @include(if: $isLive) { value signature }
   videoPlaybackAccessToken(id: $vodID, params: {platform: "web", playerBackend: "mediaplayer", playerType: $playerType}) @include(if: $isVod) { value signature }
 }"""
-VOD_QUALITIES = ("1080", "720", "480", "360", "audio")
+VOD_QUALITIES = ("1440", "1080", "720", "480", "360", "audio")
 PRECISE_LIMIT = 20 * 60
 
 
@@ -1095,8 +1121,8 @@ def pick_variant(vs, quality):
         q = int(quality)
     except (TypeError, ValueError):
         return vids[0]
-    fit = [v for v in vids if v["height"] <= q + 1]
-    return fit[0] if fit else vids[-1]
+    h = nearest_height([v["height"] for v in vids], q)
+    return next(v for v in vids if v["height"] == h)
 
 
 def parse_media(text, base):
@@ -1173,7 +1199,7 @@ def clock(sec):
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
-def segments_to_file(chunks, dst, n, offset=0.0, duration=None, precise=False, audio=False, cancel=None, progress=None, fmp4=False):
+def segments_to_file(chunks, dst, n, offset=0.0, duration=None, precise=False, audio=False, cancel=None, progress=None, fmp4=False, hevc=False):
     ff = find_ffmpeg()
     if not ff:
         raise TwitchError(L("Не найден ffmpeg рядом с программой. Переустановите ClipSearch.", "ffmpeg was not found next to the app. Reinstall ClipSearch."))
@@ -1187,7 +1213,7 @@ def segments_to_file(chunks, dst, n, offset=0.0, duration=None, precise=False, a
                     f.write(data)
                     if progress:
                         progress(min(99, (i + 1) * 70 // max(1, n)))
-            return segments_to_file(iter(()), dst, 1, offset, duration, precise, audio, cancel, None, fmp4=None)
+            return segments_to_file(iter(()), dst, 1, offset, duration, precise, audio, cancel, None, fmp4=None, hevc=hevc)
         finally:
             try:
                 os.remove(src)
@@ -1212,7 +1238,7 @@ def segments_to_file(chunks, dst, n, offset=0.0, duration=None, precise=False, a
     elif precise:
         cmd += ["-c:a", "aac", "-b:a", "192k"]
     else:
-        cmd += ["-c", "copy", "-bsf:a", "aac_adtstoasc"]
+        cmd += ["-c", "copy", "-bsf:a", "aac_adtstoasc"] + (["-tag:v", "hvc1"] if hevc else [])
     cmd += ["-movflags", "+faststart", "-f", "mp4", dst]
     flags = 0x08000000 if os.name == "nt" else 0
     pr = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, creationflags=flags)
@@ -1285,6 +1311,202 @@ def vod_master(vod_id):
     vs = parse_master(text, url)
     if not vs:
         raise TwitchError(L("Twitch не отдал список качеств записи.", "Twitch did not return the video qualities."))
+    return add_hidden_source(vs)
+
+
+def ts_video_size(data):
+    pmt_pid, vid_pid, buf = None, None, bytearray()
+    for i in range(0, len(data) - 187, 188):
+        pk = data[i:i + 188]
+        if pk[0] != 0x47:
+            continue
+        pid = ((pk[1] & 0x1F) << 8) | pk[2]
+        pusi = bool(pk[1] & 0x40)
+        off = 4 + ((pk[4] + 1) if (pk[3] & 0x20) else 0)
+        if off >= 188:
+            continue
+        if pid == 0 and pusi and pmt_pid is None:
+            o = off + 1 + pk[off]
+            n = ((pk[o + 1] & 0x0F) << 8) | pk[o + 2]
+            for j in range(o + 8, o + 3 + n - 4, 4):
+                if ((pk[j] << 8) | pk[j + 1]) != 0:
+                    pmt_pid = ((pk[j + 2] & 0x1F) << 8) | pk[j + 3]
+                    break
+        elif pid == pmt_pid and pusi and vid_pid is None:
+            o = off + 1 + pk[off]
+            n = ((pk[o + 1] & 0x0F) << 8) | pk[o + 2]
+            j = o + 12 + (((pk[o + 10] & 0x0F) << 8) | pk[o + 11])
+            while j < o + 3 + n - 4:
+                st, epid, eil = pk[j], ((pk[j + 1] & 0x1F) << 8) | pk[j + 2], ((pk[j + 3] & 0x0F) << 8) | pk[j + 4]
+                if st == 0x1B:
+                    vid_pid = epid
+                    break
+                j += 5 + eil
+        elif pid == vid_pid and vid_pid is not None:
+            body = pk[off:]
+            if pusi and len(body) > 9 and body[:3] == b"\x00\x00\x01":
+                body = body[9 + body[8]:]
+            buf += body
+            k = buf.find(b"\x00\x00\x01\x67")
+            if k >= 0 and len(buf) > k + 64:
+                return sps_size(bytes(buf[k + 4:k + 64]))
+            if k < 0 and len(buf) > 8:
+                del buf[:-8]
+    return None
+
+
+def mp4_video_size(data):
+    for tag in (b"avc1", b"avc3", b"hvc1", b"hev1", b"av01"):
+        k = data.find(tag)
+        while k >= 4:
+            box = int.from_bytes(data[k - 4:k], "big")
+            if 86 <= box < 4096 and len(data) >= k + 32:
+                w, h = int.from_bytes(data[k + 28:k + 30], "big"), int.from_bytes(data[k + 30:k + 32], "big")
+                if 64 <= w <= 8192 and 64 <= h <= 8192:
+                    return w, h, tag.decode()
+            k = data.find(tag, k + 1)
+    return None
+
+
+def sps_size(raw):
+    b = bytearray()
+    z = 0
+    for x in raw:
+        if z >= 2 and x == 3:
+            z = 0
+            continue
+        b.append(x)
+        z = z + 1 if x == 0 else 0
+    pos = [0]
+
+    def bit():
+        v = (b[pos[0] >> 3] >> (7 - (pos[0] & 7))) & 1
+        pos[0] += 1
+        return v
+
+    def bits(n):
+        v = 0
+        for _ in range(n):
+            v = (v << 1) | bit()
+        return v
+
+    def ue():
+        z = 0
+        while bit() == 0:
+            z += 1
+            if z > 31:
+                raise ValueError("bad sps")
+        return (1 << z) - 1 + bits(z)
+
+    def se():
+        v = ue()
+        return (v + 1) // 2 if v & 1 else -(v // 2)
+
+    try:
+        prof = bits(8)
+        bits(16)
+        ue()
+        chroma = 1
+        if prof in (100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135):
+            chroma = ue()
+            if chroma == 3:
+                bit()
+            ue()
+            ue()
+            bit()
+            if bit():
+                for i in range(8 if chroma != 3 else 12):
+                    if bit():
+                        last, nxt = 8, 8
+                        for _ in range(16 if i < 6 else 64):
+                            if nxt:
+                                nxt = (last + se() + 256) % 256
+                            last = nxt or last
+        ue()
+        poc = ue()
+        if poc == 0:
+            ue()
+        elif poc == 1:
+            bit()
+            se()
+            se()
+            for _ in range(ue()):
+                se()
+        ue()
+        bit()
+        w = ue() + 1
+        h = ue() + 1
+        frame_only = bit()
+        if not frame_only:
+            bit()
+        bit()
+        cl = cr = ct = cb = 0
+        if bit():
+            cl, cr, ct, cb = ue(), ue(), ue(), ue()
+        sx, sy = (2, 2) if chroma == 1 else ((2, 1) if chroma == 2 else (1, 1))
+        width = w * 16 - (cl + cr) * sx
+        height = (2 - frame_only) * h * 16 - (ct + cb) * sy * (2 - frame_only)
+        return width, height
+    except (IndexError, ValueError):
+        return None
+
+
+def head_bytes(url, n=2500000, timeout=20):
+    req = urllib.request.Request(url, headers={"User-Agent": WEB_UA, "Range": f"bytes=0-{n - 1}"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read(n)
+
+
+def add_hidden_source(vs):
+    vids = [v for v in vs if not v["audio"]]
+    if not vids:
+        return vs
+    top = max(vids, key=lambda v: (v["height"], v["fps"]))
+    m = re.match(r"(https://[^?]+/)[^/?]+/(index[^/?]*\.m3u8)", top["url"])
+    if not m or any("/chunked/" in v["url"] for v in vids):
+        return vs
+    text, url = "", ""
+    for name in dict.fromkeys((m.group(2), "index-dvr.m3u8")):
+        url = m.group(1) + "chunked/" + name
+        try:
+            text = web_get(url, timeout=12, tries=1).decode("utf-8", "replace")
+        except Exception:
+            text = ""
+        if text.startswith("#EXTM3U"):
+            break
+    if not text.startswith("#EXTM3U"):
+        log(f"hidden source: no original for {top['url'][:90]}")
+        return vs
+    try:
+        pl = parse_media(text, url)
+        segs = pl["segs"]
+        size = None
+        codec = "avc1"
+        if pl.get("init"):
+            got = mp4_video_size(head_bytes(pl["init"], 200000))
+            if got:
+                size, codec = (got[0], got[1]), got[2]
+            segs = []
+        for sg in segs[:4]:
+            try:
+                data = head_bytes(sg["url"])
+            except urllib.error.HTTPError:
+                if "-unmuted" not in sg["url"]:
+                    continue
+                data = head_bytes(sg["url"].replace("-unmuted", "-muted"))
+            size = ts_video_size(data)
+            if size:
+                break
+            log(f"hidden source: no size in {sg['url'][-40:]} ({len(data)} B)")
+    except Exception as e:
+        log(f"hidden source: {e!r}")
+        return vs
+    if not size or size[1] <= top["height"]:
+        return vs
+    fps = top["fps"] or 60
+    vs.append({"url": url, "height": size[1], "fps": fps, "name": f"{size[1]}p{fps if fps >= 50 else ''}", "audio": False, "bw": top["bw"] * 2,
+               "codec": codec})
+    log(f"hidden source {size[0]}x{size[1]} {codec} for {top['url'][:80]}")
     return vs
 
 
@@ -1299,7 +1521,7 @@ def quality_list(vs):
     for v in sorted(vs, key=lambda v: (not v["audio"], v["height"], v["fps"]), reverse=True):
         key = "audio" if v["audio"] else str(v["height"])
         if key not in [q["key"] for q in out]:
-            out.append({"key": key, "name": L("Только звук", "Audio only") if v["audio"] else v["name"], "bw": v["bw"]})
+            out.append({"key": key, "name": L("Только звук", "Audio only") if v["audio"] else v["name"] + (" (HEVC)" if str(v.get("codec", "")).startswith(("hev", "hvc")) else ""), "bw": v["bw"]})
     return out
 
 
@@ -1373,44 +1595,74 @@ def gql_post(body, timeout=20):
     raise TwitchError(L(f"Twitch не отдал чат: {getattr(last, 'reason', last)}", f"Twitch did not return the chat: {getattr(last, 'reason', last)}"))
 
 
-def fetch_chat(vod_id, start, end, cancel=None, progress=None):
-    out, seen, cur, off = [], set(), None, int(max(0, start))
-    for _ in range(20000):
-        if cancel is not None and cancel.is_set():
-            raise Cancelled()
-        variables = {"id": str(vod_id)}
-        if cur:
-            variables["cur"] = cur
-        else:
-            variables["off"] = off
-        d = gql_post({"query": COMMENTS_QUERY, "variables": variables})
+CHAT_CHUNK = 300
+CHAT_WORKERS = 6
+
+
+def chat_node(n):
+    m = n.get("message") or {}
+    who = n.get("commenter") or {}
+    return {"id": n.get("id"), "t": float(n.get("contentOffsetSeconds") or 0), "name": who.get("displayName") or who.get("login") or "?",
+            "login": who.get("login") or "", "color": m.get("userColor") or "",
+            "badges": [(b.get("setID"), b.get("version")) for b in (m.get("userBadges") or []) if b],
+            "frags": [(f.get("text") or "", ((f.get("emote") or {}).get("emoteID") or None)) for f in (m.get("fragments") or [])]}
+
+
+def chat_page(vod_id, off):
+    for a in range(3):
+        d = gql_post({"query": COMMENTS_QUERY, "variables": {"id": str(vod_id), "off": int(off)}})
         video = (d.get("data") or {}).get("video")
-        if not video:
+        if video is None and not d.get("errors"):
             raise TwitchError(L("Чат этой записи недоступен.", "This video's chat is unavailable."))
-        c = video.get("comments") or {}
-        edges = c.get("edges") or []
-        last_t = None
-        for e in edges:
-            n = e.get("node") or {}
-            t = float(n.get("contentOffsetSeconds") or 0)
-            last_t = t
-            if t < start - 0.5 or n.get("id") in seen:
-                continue
-            if t > end:
-                continue
-            seen.add(n.get("id"))
-            m = n.get("message") or {}
-            who = n.get("commenter") or {}
-            out.append({"t": t, "name": who.get("displayName") or who.get("login") or "?", "login": who.get("login") or "",
-                        "color": m.get("userColor") or "", "badges": [(b.get("setID"), b.get("version")) for b in (m.get("userBadges") or []) if b],
-                        "frags": [(f.get("text") or "", ((f.get("emote") or {}).get("emoteID") or None)) for f in (m.get("fragments") or [])]})
-        if progress and last_t is not None and end > start:
-            progress(min(99, int((last_t - start) * 100 / (end - start))))
-        if not edges or not (c.get("pageInfo") or {}).get("hasNextPage") or (last_t is not None and last_t > end):
-            break
-        cur = edges[-1].get("cursor")
-        if not cur:
-            break
+        c = (video or {}).get("comments")
+        if c is not None:
+            return c.get("edges") or [], bool((c.get("pageInfo") or {}).get("hasNextPage"))
+        log(f"chat page {vod_id}@{off}: {json.dumps(d.get('errors'))[:300]}")
+        time.sleep(0.8 + a)
+    raise TwitchError(L("Twitch не отдал чат этой записи. Попробуйте ещё раз чуть позже.", "Twitch did not return this video's chat. Try again a bit later."))
+
+
+def fetch_chat(vod_id, start, end, cancel=None, progress=None):
+    from concurrent.futures import ThreadPoolExecutor
+    lo, hi = int(max(0, start)), int(math.ceil(max(start, end)))
+    spans = [(x, min(hi, x + CHAT_CHUNK)) for x in range(lo, hi, CHAT_CHUNK)] or [(lo, lo + 1)]
+    done, lock = [0.0], threading.Lock()
+
+    def walk(span):
+        a, b = span
+        off, got, mark = a, [], a
+        for _ in range(20000):
+            if cancel is not None and cancel.is_set():
+                raise Cancelled()
+            edges, more = chat_page(vod_id, off)
+            last_t = None
+            for e in edges:
+                n = e.get("node") or {}
+                t = float(n.get("contentOffsetSeconds") or 0)
+                last_t = t if last_t is None else max(last_t, t)
+                if a - 0.5 <= t < b and t >= start - 0.5 and t <= end:
+                    got.append(chat_node(n))
+            if last_t is not None:
+                step = min(b, last_t) - mark
+                if step > 0:
+                    mark += step
+                    with lock:
+                        done[0] += step
+                        if progress and hi > lo:
+                            progress(min(99, int(done[0] * 100 / (hi - lo))))
+            if not edges or not more or last_t is None or last_t >= b:
+                break
+            off = int(last_t) if int(last_t) > off else off + 1
+        return got
+
+    out, seen = [], set()
+    with ThreadPoolExecutor(min(CHAT_WORKERS, len(spans))) as ex:
+        for part in ex.map(walk, spans):
+            for m in part:
+                if m["id"] in seen:
+                    continue
+                seen.add(m["id"])
+                out.append(m)
     out.sort(key=lambda m: m["t"])
     return out
 
@@ -1916,7 +2168,7 @@ def download_vod(src, folder, progress=None, cancel=None):
     offset = st - chosen[0][0] if precise else 0.0
     urls = ([pl["init"]] if pl["init"] else []) + [s["url"] for _, s in chosen]
     tail = f" ({hms(st)}-{hms(en)})" if cut else ""
-    if quality != "1080":
+    if audio or v["height"] != 1080:
         tail += f" [{v['name']}]"
     ext = ".m4a" if audio else ".mp4"
     base = render_name(name_fields(src.get("name") or src.get("login") or "", src.get("title") or "", src.get("created") or "", src.get("game") or "",
@@ -1930,7 +2182,7 @@ def download_vod(src, folder, progress=None, cancel=None):
     notes = [L("Twitch заглушил звук в части этого отрезка", "Twitch muted the audio in part of this range")] if muted else []
     try:
         segments_to_file(fetch_ordered(urls, cancel), tmp, len(urls), offset, (en - st) if precise else None, precise, audio, cancel, p1,
-                         fmp4=bool(pl["init"]))
+                         fmp4=bool(pl["init"]), hevc=str(v.get("codec", "")).startswith(("hev", "hvc")))
         if chat:
             begin = st if precise else chosen[0][0]
             try:
@@ -2917,6 +3169,7 @@ button.brand { border: 0; background: none; color: inherit; font: inherit; curso
 .sorts .hidedl[aria-checked="true"] .tr::after { left: 16px; }
 .thumb .bdg, .vd .vth .bdg { position: absolute; left: 7px; bottom: 7px; z-index: 3; display: flex; gap: 5px; align-items: center; pointer-events: none; }
 .bdg > * { pointer-events: auto; }
+.ccb.hq { background: linear-gradient(180deg, rgba(122, 99, 255, 0.92), rgba(80, 64, 210, 0.92)); color: #fff; border-color: rgba(200, 190, 255, 0.5); }
 .ccb { background: rgba(5, 8, 24, 0.82); color: #dfe5ff; font-size: 10.5px; font-weight: 700; letter-spacing: .06em; padding: 2px 6px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.22); animation: fadeIn .3s ease both; }
 .dlb { display: inline-flex; align-items: center; gap: 4px; border: 0; font: inherit; font-size: 11.5px; font-weight: 600; color: #fff; padding: 2px 8px 2px 6px; border-radius: 7px; cursor: pointer;
   background: linear-gradient(180deg, rgba(46, 184, 120, 0.95), rgba(30, 140, 92, 0.95)); box-shadow: 0 2px 10px rgba(20, 120, 80, 0.45); animation: fadeIn .3s ease both; }
@@ -3277,7 +3530,7 @@ button.brand { border: 0; background: none; color: inherit; font: inherit; curso
     <div class="stbody">
       <section><h3>Загрузки</h3>
         <div class="srow"><span class="lbl">Папка загрузок</span><span class="spath" id="stDir"></span><button class="btn slim" id="stDirBtn" type="button">Изменить</button></div>
-        <div class="srow"><span class="lbl">Качество клипов</span><div class="seg solid" id="stQ"><button class="chip" type="button" data-v="1080">1080p</button><button class="chip" type="button" data-v="720">720p</button><button class="chip" type="button" data-v="480">480p</button></div></div>
+        <div class="srow"><span class="lbl">Качество клипов</span><div class="seg solid" id="stQ"><button class="chip" type="button" data-v="1440" title="Если у клипа есть 2K; иначе лучшее из того, что есть">2K</button><button class="chip" type="button" data-v="1080">1080p</button><button class="chip" type="button" data-v="720">720p</button><button class="chip" type="button" data-v="480">480p</button></div></div>
         <div class="srow"><span class="lbl">Скачивать одновременно<small>Больше — быстрее, если интернет быстрый</small></span><div class="seg solid" id="stPar"><button class="chip" type="button" data-v="1">1</button><button class="chip" type="button" data-v="2">2</button><button class="chip" type="button" data-v="3">3</button><button class="chip" type="button" data-v="4">4</button></div></div>
         <div class="srow top"><span class="lbl">Имя файла<small>Нажмите на поле ниже, чтобы добавить его</small></span><div class="sgrow"><label class="field" for="stName"><input id="stName" maxlength="120" autocomplete="off" spellcheck="false"></label><div class="tok" id="stTok"><button type="button" data-t="{streamer}">стример</button><button type="button" data-t="{title}">название</button><button type="button" data-t="{date}">дата</button><button type="button" data-t="{game}">категория</button><button type="button" data-t="{views}">просмотры</button><button type="button" data-t="{creator}">автор клипа</button><button type="button" data-t="" id="stNameDef">как было</button></div><div class="snote" id="stNameEx"></div></div></div>
         <div class="srow"><span class="lbl">Звук, когда всё скачалось</span><button class="switch" type="button" role="switch" aria-checked="true" id="stSound"><span class="tr"></span></button></div>
@@ -3364,7 +3617,8 @@ const EN = {
   "Убрать из «Часто ищете»": "Remove from “Frequent searches”", "Убрано из «Часто ищете»": "Removed from “Frequent searches”", "Проверяю…": "Checking…", "нет связи": "no connection",
   "Исправления и улучшения.": "Fixes and improvements.", "Не удалось скачать обновление": "Couldn’t download the update",
   "Запускаю установку… Программа перезапустится сама.": "Starting the installer… The app will restart by itself.", "Установщик скачан. Запустите его, чтобы обновиться.": "The installer has been downloaded. Run it to update.",
-  "Наилучшее качество": "Best quality", "Рекомендуется": "Recommended", "Файл примерно вдвое меньше": "About half the file size", "Минимальный размер — удобно переслать": "Smallest size — easy to share",
+  "Наилучшее качество": "Best quality", "Если у клипа есть 2K; иначе лучшее из того, что есть": "If the clip has 2K; otherwise the best available", "2K (1440p)": "2K (1440p)", "Только у клипов со стримов в 2K, у остальных — лучшее из того, что есть": "Only clips from 2K streams have it; others get the best available",
+  "Клипы со стримов в 2K будут скачиваться в 2K, остальные — в лучшем качестве": "Clips from 2K streams will download in 2K, others in the best quality available", "Рекомендуется": "Recommended", "Файл примерно вдвое меньше": "About half the file size", "Минимальный размер — удобно переслать": "Smallest size — easy to share",
   "или в": "or in", "Выбрать": "Select", "Пробел": "Space", "Скопировать название": "Copy title", "Название скопировано": "Title copied",
   "Перейти к соседнему клипу": "Move to the next clip", "Смотреть и обрезать клип": "Watch and trim the clip", "Выбрать клип или снять выбор": "Select or unselect the clip",
   "Скачать клип": "Download the clip", "Скачать все выбранные": "Download all selected", "Скопировать ссылку на клип": "Copy the clip link",
@@ -3412,7 +3666,7 @@ const RULES = [
   [/^Диск занят на (\d+)%: (.+) из (.+)$/, "Disk $1% full: $2 of $3"],
   [/^Больше всего клипов \((\d+)\) пришлось на период около (.+)\. Наведите на столбик, чтобы увидеть число\.$/, "Most clips ($1) were made around $2. Hover a bar to see the number."],
   [/^У вас последняя версия (.+)$/, "You have the latest version $1"], [/^Доступна версия (.+)$/, "Version $1 available"], [/^Доступна новая версия (.+)$/, "New version $1 available"],
-  [/^Скачиваю установщик… (\d+)%$/, "Downloading the installer… $1%"], [/^Качество: (\d+)p$/, "Quality: $1p"], [/^Скачать в (\d+)p$/, "Download in $1p"],
+  [/^Скачиваю установщик… (\d+)%$/, "Downloading the installer… $1%"], [/^Качество: (\d+)p$/, "Quality: $1p"], [/^Качество: 2K$/, "Quality: 2K"], [/^Скачать в 2K$/, "Download in 2K"], [/^Есть у (\d+) клип(а|ов)$/, "$1 clips have it"], [/^Скачать в (\d+)p$/, "Download in $1p"],
   [/^Клипы будут скачиваться в (\d+)p$/, "Clips will download in $1p"], [/^Скачать выбранные \((\d+)\)$/, "Download selected ($1)"],
   [/^Скопировать ссылки выбранных \((\d+)\)$/, "Copy selected links ($1)"], [/^Все клипы (.+)$/, "All clips by $1"], [/^Клипы автора (.+)$/, "Clips by author $1"],
   [/^Убрать (.+)$/, "Remove $1"], [/ \(фрагмент ([^)]+)\)/g, " (part $1)"], [/(\d[\d,.]*) с$/, "$1 s"], [/(\d+) мин( (\d+) с)?$/, (_, m, __, s) => `${m} min` + (s ? ` ${s} s` : "")],
@@ -4093,7 +4347,7 @@ function paintCached(info) {
 
 const CCQ = { want: new Set(), busy: false };
 function needCc(rows) {
-  rows.forEach((r) => { if (r.cc == null && !r._ccA) { r._ccA = 1; CCQ.want.add(r.id); } });
+  rows.forEach((r) => { if ((r.cc == null || r.hq == null) && !r._ccA) { r._ccA = 1; CCQ.want.add(r.id); } });
   pumpCc();
 }
 async function pumpCc() {
@@ -4104,13 +4358,13 @@ async function pumpCc() {
       const r = await api("/api/captions", { ids }).catch(() => null);
       if (gen !== S.gen) continue;
       if (!r || !r.cc) { ids.forEach((id) => { const x = S.byId.get(id); if (x) x._ccA = 0; }); break; }
-      ids.forEach((id) => { const x = S.byId.get(id); if (x && r.cc[id] != null) { x.cc = !!r.cc[id]; if (x.cc) paintBadges(x); } });
+      ids.forEach((id) => { const x = S.byId.get(id); if (!x) return; if (r.hq && r.hq[id]) x.hq = r.hq[id]; if (r.cc[id] != null) x.cc = !!r.cc[id]; if (x.cc || x.hq >= 1440) paintBadges(x); });
     }
   } finally { CCQ.busy = false; }
 }
 const OKI = '<svg class="i" viewBox="0 0 24 24"><path d="m5 12 5 5 9-10"/></svg>';
 function badgesHtml(r) {
-  return (r.dl ? `<button class="dlb" type="button" data-a="open" title="${esc(tt("Открыть скачанный файл", "Open the downloaded file"))}">${OKI}${esc(tt("Скачан", "Downloaded"))}</button>` : "") + (r.cc ? '<span class="ccb">CC</span>' : "");
+  return (r.dl ? `<button class="dlb" type="button" data-a="open" title="${esc(tt("Открыть скачанный файл", "Open the downloaded file"))}">${OKI}${esc(tt("Скачан", "Downloaded"))}</button>` : "") + (r.hq >= 1440 ? '<span class="ccb hq" title="' + esc(tt("Клип в 2K (1440p)", "Clip in 2K (1440p)")) + '">2K</span>' : "") + (r.cc ? '<span class="ccb">CC</span>' : "");
 }
 function paintBadges(r) {
   const el = document.querySelector(`#list .clip[data-id="${CSS.escape(r.id)}"] .bdg`);
@@ -4824,22 +5078,25 @@ addEventListener("keydown", (e) => {
 addEventListener("contextmenu", (e) => { if (!e.target.closest("input, textarea")) e.preventDefault(); });
 
 S.quality = "1080";
-const QDESC = { "1080": ["1080p", "Наилучшее качество", "Рекомендуется"], "720": ["720p", "Файл примерно вдвое меньше"], "480": ["480p", "Минимальный размер — удобно переслать"] };
+const QN = (q) => (q === "1440" ? "2K" : q + "p");
+function has2k(rows) { return (rows || S.all).filter((r) => r.hq >= 1440).length; }
+const QDESC = { "1440": ["2K (1440p)", "Только у клипов со стримов в 2K, у остальных — лучшее из того, что есть"], "1080": ["1080p", "Наилучшее качество", "Рекомендуется"], "720": ["720p", "Файл примерно вдвое меньше"], "480": ["480p", "Минимальный размер — удобно переслать"] };
 function paintQuality() {
-  document.querySelectorAll(".qtext").forEach((t) => (t.textContent = `Качество: ${S.quality}p`));
-  if ($("bDl")) $("bDl").lastChild.textContent = `Скачать в ${S.quality}p`;
-  document.querySelectorAll('.acts [data-a="dl"]').forEach((b) => (b.title = `Скачать в ${S.quality}p`));
+  document.querySelectorAll(".qtext").forEach((t) => (t.textContent = `Качество: ${QN(S.quality)}`));
+  if ($("bDl")) $("bDl").lastChild.textContent = `Скачать в ${QN(S.quality)}`;
+  document.querySelectorAll('.acts [data-a="dl"]').forEach((b) => (b.title = `Скачать в ${QN(S.quality)}`));
 }
 function setQuality(q) {
   if (S.quality === q) return;
-  S.quality = q; paintQuality(); api("/api/settings", { quality: q }); toast(`Клипы будут скачиваться в ${q}p`);
+  S.quality = q; paintQuality(); api("/api/settings", { quality: q }); toast(q === "1440" ? "Клипы со стримов в 2K будут скачиваться в 2K, остальные — в лучшем качестве" : `Клипы будут скачиваться в ${q}p`);
 }
 document.querySelectorAll("[data-qbtn]").forEach((b) => b.addEventListener("click", () => {
   if (b.classList.contains("open")) { closeMenu(); return; }
   const r = b.getBoundingClientRect();
   b.classList.add("open");
-  openMenu([{ head: "Качество скачивания" }].concat(["1080", "720", "480"].map((q) => ({
-    icon: "q", label: QDESC[q][0], sub: QDESC[q][1], badge: QDESC[q][2], checkable: true, checked: S.quality === q, run: () => setQuality(q),
+  const n2k = has2k();
+  openMenu([{ head: "Качество скачивания" }].concat((n2k || S.quality === "1440" ? ["1440", "1080", "720", "480"] : ["1080", "720", "480"]).map((q) => ({
+    icon: "q", label: QDESC[q][0], sub: QDESC[q][1], badge: q === "1440" ? (n2k ? tt(`Есть у ${n2k} ${plural(n2k, ["клипа", "клипов", "клипов"])}`, `${n2k} ${n2k === 1 ? "clip has it" : "clips have it"}`) : "") : QDESC[q][2], checkable: true, checked: S.quality === q, run: () => setQuality(q),
   }))), r.left, r.bottom + 6, { below: true, anchorTop: r.top, onClose: () => b.classList.remove("open") });
 }));
 
@@ -4869,12 +5126,12 @@ function searchFor(fn) {
 }
 function clipMenu(i, x, y) {
   const r = S.rows[i]; if (!r) return;
-  const sel = S.selected.has(r.id), many = sel && S.selected.size > 1, nick = nickOf(r.broadcaster), other = ["1080", "720", "480"].filter((q) => q !== S.quality);
+  const sel = S.selected.has(r.id), many = sel && S.selected.size > 1, nick = nickOf(r.broadcaster), other = (r.hq >= 1440 ? ["1440", "1080", "720", "480"] : ["1080", "720", "480"]).filter((q) => q !== S.quality);
   openMenu([
     { head: r.title },
     { icon: "play", label: "Смотреть и обрезать", kbd: "Enter", run: () => openPlayer(r) },
-    { icon: "dl", label: `Скачать в ${S.quality}p`, kbd: "D", run: () => startDownload([r]) },
-    { chips: other.map((q) => ({ label: q + "p", run: () => startDownload([r], q) })), label: "или в" },
+    { icon: "dl", label: `Скачать в ${QN(S.quality)}`, kbd: "D", run: () => startDownload([r]) },
+    { chips: other.map((q) => ({ label: QN(q), run: () => startDownload([r], q) })), label: "или в" },
     many ? { icon: "dl", label: `Скачать выбранные (${S.selected.size})`, kbd: "Shift D", run: () => startDownload(selRows()) } : null,
     { icon: "check", label: sel ? "Снять выбор" : "Выбрать", kbd: "Пробел", run: () => toggleSel(i) },
     { sep: true },
@@ -6053,7 +6310,9 @@ def make_handler(ctx):
                 return {"path": p}
             if path == "/api/captions":
                 ids = [str(x) for x in (b.get("ids") or [])[:400] if re.fullmatch(r"[A-Za-z0-9_-]{1,120}", str(x))]
-                return {"cc": clip_captions(ids) if ids else {}}
+                hq = {}
+                cc = clip_captions(ids, hq_out=hq) if ids else {}
+                return {"cc": cc, "hq": hq}
             if path == "/api/downloaded":
                 c, v = DONE.lookup([str(x) for x in (b.get("clips") or [])[:5000]], [str(x) for x in (b.get("vods") or [])[:2000]],
                                    ctx.download_dir())
@@ -6343,7 +6602,7 @@ def run_app(open_window=True):
     srv.shutdown()
     return ctx
 
-HOST_B64 = "eNrVfWtz48iR4F9BK3anQTcFkRSlVuvRberVTY/U0knqaY9bHRMgUSRhgQAMgHqMRhe7dtwjwhuxERf36SJu9y94vfat174Z/wXpH21mVhWeBZBUt2N3ZU8TKFRlZVVl5auyqm4XjgNvGJhjox8urGsLk9B2h9rpTRix8ca5m341djzHYf3I9tzQeM1cFtj9fJZd2xy6XhjZ/bDwKTCv4DWf3D3KpxzY7i/yaW9ZpEgyTr3+BYsKVZ2wgUC08GXiRvaYQVPGvu2w4JQFl3afhWX5um7EAs8vy3bK+pPAjm6MneDGj7Af/dFNPtMZuy4gfzYKmGkpuiP+YJyZ4UWhwvesZ5z2A9uHtkP/m479ralq53vbtbyr0Nj3gnEC5NDuB17oDSL8vtyC9HPXNccs9M0+03YcGxpqBv1Rx/fP3dtzV4O/MIIK+lrfMcNQO3CHPFV8xD9/0nMgg8iH2Huuc6P1PM/RTibaltYJAvMGetJi10cD3WVXHz5qt9r5QjA5X6jD7+SC//YY/72Ad+2uLpvy2vF6cTuNnYkTTQLWdQcePAcBc6N3XZFonF15ByyCEeueHh2Y7nBiDtlbaF9Ne7mlNTbKcA6jAHvnTBcPwaQu05hbA1wDBuBdbM0r+KitQ/KGdsfB3WEnFjpKTKopnUV9dDr2LtiGhIJ/H07POpwOPiaJoojtRtqhabsCV+hKMxiGtSRfqjL8g6Hc9cZQQPaWeOuEIRv3nJsTFnrOJdOebWnicW/cY5bFrI0sIEITRhOrMzrujW5qWy81+GcLhmxxMcTP5wu1XKkouEn3n6sTtnHnyb++GfVHmr533Wc+DrPGrmvZHLlm4d+BNzTew+xj+vnCwIxMZx0w0Z5h2Y1ibsIfikDm/c5Z50DmNQ5ZGAKdqMrYA01/QgVrmsi27V0bpyPvSj/AKQrA7v/x4W/uf7j/Z/j3N/f/H/73G+3++/vfa/f/Au9/fvjVw98+/PL+D/d/uv8NPP0doog0fjZimun72sAELmRpkYfjG0T4uZZBCzMnExMLJ4hsT6IIefHRl+nUbh+myV4QeIGqSWIomrlPqfG4S5OioDpJLXka0b3ez4HRaiGD2R3U48+XQGgdGGmNlVOmmGHIf4CsgC3EteCU1ZlBM5f+hR45XzAsxzlfyOHN+Zp+GsFsGWshchsBBCRUtHcN/DmCHDJRr2HyoenaAxZGiO0k6DNeWkdMatPJDokiRLJ3J45Tkx2KL4ruFvhdmoE2DkUzD9nYC25EpTXkLyHII//mzNPHODcExLghB55pwRfjzCNOCkUK86ds+LLs5tKzrWQeiP6PQDqVD1J6BnC8lBN8H6jYAFYDZNBxHBR4+rEZjVDM9myX8Rfo+TM29vFZryFd94GuQ6Jrzj6M6DoC+q8TTjDme+6lHXjuGIgJpP0V6AUMmy64xW1pqz8csmjkWd2x7+jJ45HPNZe3Xtd1bBfaXlOzV2RTM3JXzD6wCzIOC9U5W/RBHIwWBwFK2SJ7xO6F8iidtC++QFDPtKa2yZnsAXOH0Qjp4y3gdsmMPdfsOWzXtztXJrBymPE69McpVcE54T7VQ/V/4MA+JgTVKJDN4QR6WkMSdWgOFmk4Nf5TJwZJsz5QdVQQHtTDcTU4B7BmPQomwOB+fL5w4PVN5/w8YXTGKeXuujAubp8UA28SSeilvFp+T/ps3+tPwqNoBDqBgKVX9UjutarjC3IWZhrXUXj2r+xwYjqn0Y3DqrOfsgjVUXiBUjh3ToibQgfssoEJqo0+MJ2QBFROJNPIa5zG1OPHp2eSA7qel8Je4MnGNhuCPjGbUAZgabHLIawXZWkOqez8jIcLORsLjOOA+dCv+qzMl4N+IjmwaMaO44VMn0n0u54GivRXNrtqgT5Hmn5xbsrqMtxPW1bkQu4eQFPzKkIxJ6ktUnH43/d/evh7DXSHP4LCAFrDn7OKxMOvQZF4+NX9/7v//f33GmT6AVL/DP9+jwkPv0y0eW3PGrK4RYZ2/w/3//Tw64f/ATl/QPjfaxyMdv971EYe/k67/60mLASt2dDu/6A1m3WNZ/+X+99RNsj0+/t/xhTSZgDDh/8JWswP+Mk4h+E8d+//AVSbPz78DdSFQAk2Iv/9/R8e/vvDr7gKBO2B2v8F8P9DjOIrmM/qzuF/iX50RVgC3TIr1GAWlzVa68MM8lyUFFo3ArELUw/UFUhlIQCJRun2mq5FDe4BR7Ej7coM3afAx70JpAOjYKJ5RyDOqM64EgDgOkCzmg/D/ApFlboV01W2r1n41itobWjVBGPiCmXUGKDmAVa24w1BfQHmgKBqaG+AeRoap6hFAnGNosgP15eWhp4xjo0+6I2lwRXIvoslf+kViNOLrrXVarbazxvLavoXRN8qaovZBJwBPRNscehBzmW2+VthPopcAtH8V4SDXSClBFgqaMHqolRdMuQd032NdhbqEXz6VzFYFOgItRwXzy+g8nrH+JIxv+NAfTqXXfksoncQtLF3bQMXt9hGRicpNxCBHRWMw7wJLZRrEI4XokN4SgZXpSm7awfAqYcsSoyvjD6W1qxALdv3HODDpJilv5z6rA+Uxr8aJKNT3boLJlctb56QfnZXqYBy2TGT9gnSa6pEcLB3dOyjWvHjrXp+QvdAN4ISbuyQwhC/6/Ckmgf4N03HhaLYG5xjLcL8jNVZ6Cl2ht6kt94VaPGn1HSYpDfwt3h4uGhZ2ps36+Pxehhy8w/EKRep5YpwHRL7HjmK3p3tr6mQrlZt1Ep0hmA5pYqZXKBWwXI0H36L9Iia8bEXRCpK5d4WkKpu8eul5wCpgJ7IfSMwM33uJcvlY2hiah1y8m1CZS9hUEntnDIzwCSsnBnSUolJgozRjHZHRiVqeJiXZkAgDMmQG/do13wjmQu7ZhXTgnB6Fzh5nDgHBwbebD03GvC/5joRBHYpEcgSmMIcpqIL0czj/LXasCOSBs4VRiGoeWD8grgLSNxeEbm/9YA1gFSMVUBUW6Q6cP+vqCmAckGIYXEFM3cE4zrr+wdQDTqN9e5xx7IClFYHnudjP9W1Rr6wE0sI3uYtTYeCe6517MFo1xzOjuDdp3eDaI1KKXg5iSeBSe8mYh+aqx/VjgRS5eBhSzsBLcEbv52MeywgZ7cJ1CD4BVrtkAvpZBvAhXovXyNRN0DZRqngXrIgAg4aT/1ezThhILb6qEMvcqIBIoEMB94VWiqAhm26avnoh7ZoipiB1FGoOuAYCrOTBZdMW1z0seuyhAOpESFHyYTndLX7XchOR8xxOO2jEUcmSV3j/fHW49oVpHOTjr+S7QNpAs9UovHGtizmKtSn915wgZaPnH5YXDklkeBy5e9yvYWcKaleEBR0X02RTxhtJ6aNhEAOrFA0R5kbxD2z0Guqg6UP5sHWy+m2CzAsYNnYIw0Fu+ammsgQV0I6hdrnofKDSiWMcfxojBFkuXdTcFh0PyAHTcwqfNNVZe82qr1NxLnfmzbYsaZ1o2OzxxU+FKTpEEkHUbnCZvKRAkFXoP+rEYoGPbwy9hzTD5l1aDuOHTJQnsE+2MzWU2FCUve+MUM+jLFxR0StHpqZdQviIOwXyLDeAAsH2+GE/WLCwqiWPEo2gowf56SNyr/vDtVKOFc1f2GgCoFOkC2tudJobFAa0Pb1jdr0V3E2FvoZxEKwmUJWQ0gwweR7wRAvGCGQEQcpmoQ7RK9bGoJMUoyjL+NOVUwhhTpSopLE/JSWQ4xTB1RyvdUoiIs7tWaeG88KaYlSo5RE40miZAizaKmS6OT0wun2JEeFShIrJ7KLAmtTyoTzhcgMLy5sdJ6jcFjybcEXqPquxaXC0pm2tI/a5+2czF67K6NZbPNFwk8uDOQJYM5hc/V2oziIsyqt1S4pGCtp2akcU3czG2jom4q13k/zLiuW/WKn17QFEssOpBCUSiq2V5gb8F7kGuX2jVW0b0Q1PlSQr8fidUj/h3DX0TpM7S+4EFNS49xLM4kyixqVY1tHPqpxME4Zhfa3Bdcb13B///BLbZamx77vkC9lpbVq7NUaTnapUtOcpFTh30d0pa+/TEgj4NmtW65IiAHBOsWgDCRuQvoQFrVk8WlQdAHn5l33KO64EglxWy44ZiawRZq0rye2hcYu/uq1tNn8FlXl00mPE67eqGurtdQKYRk7IloHOyG0iXOolbAcOc/Xe2pwd/MyORxy4efCDjmwe4EJU5eTElBL142Oo8D4GQu8mWk8XpGW7tg/3P/p4W8f/n4mAp9FwAkucolu8CTKhPWM2C294wWM/pEpOSdU59K0HdTBt6FFYMB8xYIQsBfDrurdNNuPfbREPJcVzswnHFWjG74FLnEU7I396Ea/nKJRzCB5YhTGdojko5I+GcVkZlnEqaHggfmw6zggezzy+E6gy5ZbYgA/yvLsGgxPVzhTWCS0g93jLq1kZXr18dBS62Jg7KLPSuc0CnqKM2GllVhXY9O340qyQlLUhdbD7tUYauNaRyeC0euBWiKrGF2hXxizmfCpDj08oDeqmn8I7W8/CxJ78OZatMYKlXs7jk1hDszM4oIYHHZOXnffnmpjMxjabjhrPytrl93NOwAYWLY68WIOIozAQFSv+c8N/+mL1z68T2jB2jGHnwGjE+YwM2Q7po+xV/onARRtOIXuFXOlOLzjcBg39ip+cj6pXoQLrIdHmoEyF9j9kAxWG1fyP8OojbwrQbfhjdsvNqo/tj4LbYBazYYB+up4demaPr2CbojLU3b/s0GdiI4H1gGYz4HyBZRmjgQPJsnIDKD5IHXEk/EO8AQLtI69cmCGEUVCCVtlCvmlpW1KK67lgvMAUh9A34AtrvOfL21cRULb3o1s00lXg3ljbnCb9o4fsEFU107s4Qh+zjy/rm17UeSNM2LhMbWd7O2cqaqiOkR9j61K5cLGOt/u7HQOdk67P9v75rhz0jlMtZXQCUBLC5rwX2tDpssJ7PteuDE1bEkVglG1bgT10+J9pZTiahOioS+2a7U4xKnc38YhKyXpDIFJ2XbhyIhV6e2J7Vj6py2ECZX1hA3B8ghuvmQ35CKQ79xhfmj2R6B4G7i2DSo0ZNJ/fL5werR/9r5zsnd+Hutu5+dywfzt2fm5iB0VKlnRFsupWNAy49gMQqYL53eivl+gqvcVymaYzQIstZ572hH0TJrYrTqGp6K7iZMlC8cJhOwYYDBWq7Xaak6nSVVsUWWo2DjlDcd+EO0XKWDldPOBUwPg6yYqnvFqGwBKgxCPLNzmbvHccux0m3ke3yZ5sdBlBFYItOW77zTfwDV63oNvTNdyWMFCAckBlr/SByhhxvKlCA4mZV6IFjPVtRdl1pdKNipq2aii50/2Xg5sl8JRgCcau3bo80Cl6iBOxUqsiPda1zAmomgNzCQqBL8+zkkI0BFvHiF4BLTTn2WhocrZnxteXTs2KdKhmUDePth7u5sAx8U7DcUY6bB1zXT8kVnXeNRMtr6ZrRkhh1Ab2Yl1kMcZRhQ9ytXiFKxYV7X6pWCHlj0NQe53SCIFkxoeCZcY4i6gG306rFiBx303RzxKJYYYd4D3qXhmIXufYL6+8y3oTaBDFrC8zpwMWBhxcw6mC0xa/gzEjgZlnCkM+nEmeD7GfEgIF+yGp3MahhGTSn9sgCXYxzE/qv07tPITaBH9K4I4y7PdarRpCexfWinKLNcl1ci1NmAtSXhRnJqx5uJCA8czoV2qT6TL1LU3qW+WB3OWaZYdoj+kgzr6YrMYyAGMP4xk5kPbRW6PzjljNZU3k2nftNgRrYM1DLGJKQdTZOwMC7Ee1Fq5eAhaSWQ6p3z1sCyaQobLlgp27PttL7BYINe7cynGW89lGyTGui7u6uqZgVxU2eCBGimvJBbOpIGwciems4H6+6EXRupFKKH9vcYdaGDEarhWJV+M/cAbvwGzSk8L5hqph0MDFOOfakvai9VBDuR7XCrE4Aq93W5oP9IuQGS9idOWl0VattAJzE+TAr2vTFzT7QeMuYQABW7ooPKEXhC7YWuGWPBHN0oO1DaKbLlpIoarX5kG2jPaMw0f39tWNNIWtfc1aEOrDrXCqPri4xuG1g58fSO+IokWvJs4a2DuwCxIL+dr5OfJTIQseQReBDgxS/NAww1siwkODYqvOQ4zL6W0A7Q5VUHLQO3j+m0P5IuRTlYoKH3f2LvmBPkdTJTrtQb8ad/RE/00KEWktRrl/tK+vzFNTynpj5QLJBqBvMdorUvyTeenJRF0VTiTiFFH2wsjq4ESU8vaMrRn247Gpq+DmdkE6j6ewLTtUWiRGOM4ouhOXckuZ1VUDaqlCevaBCgZTgasRQWGWvwapnu+gUlZudcDmdNiOl3ytUI/cFuDU2N1PBfnbt3wZOLSCqRgd+pYWyyBqGJrZf9Q7JQmI+kTc1hlBAsma8ZDwbufRoPvYNA7uH8tbiLfwmGmhkZHfa52iCtCJzjZ9dbKCjAVs/aZNyOUNK/MbqQOJxxlk8agcpLuSQpn+ShIlYC4HnLglFLJuW4dDCcMb1Zoc7wU5BhhF6YKQcc5VjbpESs0BBVaglbjmx6fKjueA8wYuXMnGPb0BnY8ryujyQHKiFWtZO8DqkNSg0BLoH8taiLmjKaAeBf8+G6DFwv6MpDtDIeDgtu8ME4DSAiIO68QBDL2uxIcejLSUFoMHnLKhrAU+CMNHm5hTVsNqCQpoao0RGlu8qHi6l2sGHKtkPqKXlEvbPDnHhg3rSl+DWEkTh3HvIEhSERQT8kSMgz+k5xdfqsYYxh7GIiMro3DrrJpY8MBCtbm200qOMeOY459Xbxcpxwy18hvtVfw3zo8v4TxeQX/wXMGkSywPegSYJ4ZcEg9vJLrZOmtCVyXOM4xjCe+gK26XJsCuevOBJsQN1YA3Tawsev4v/VsrYstSn2GGskyaSYV1Z/65DcTbzATxNMVaffx67dcZ64WECDItlCSxa6zbBYJGef/FaBICJ/+AmQHov8tpHxbsgUibt7eta8vYk4sH9XgH/2QL/iHOsClNNDNeI4lqKoW1wPyXeSobSg1DNEvxLO0Di3TwCzmr/0U+eSYGkE/NK8xUIA/Q00gaOooZ4A51TaURJo9tUL+tnaNbTTkQFg7jjcY6NVxjb2suVYCTC94r4A1aXwdiuIU4GdTewE/z55hO7kdhhRoQx+uDTa0XqxQhx/sj/DhGtP2TQz6ESk6larFRAhk3zLaxbktOrG3UT2H9z032jfHNth+/Ef3uYYa75ylgyXKuyf2bMp94OjY5GVQISEVg7YDiS5MKtSBy/Gds6DqkIobhw7omIsbXSdsOHHMoJYEd2Y89CXNTmqRJ5ycmm6IR20MKokyNoTT/bLNRanA+nzhlA09pr3rAuMd2z34yCPyZHI28KIK8AGJURVk+qICW1BVhWojNLUCexFaG9fZRNqQTuLoVKtARPZjP6uSo91Vz8+C7tgc4u+xfc2cfRLGBv9ZbvV8HydvbV4rF2EyHeqfwfM9NE7HnheNAOQhj7ounaaZjEbHjeyOY5squ0s052gwCFk0DWwuq/EGRu+/gK1vRzdK0Kgu0jx3hyJbFfRi7ukVgGoRCK3wLADKxxBFsPY3VIGo0gDwfUYODSmCI2BKDWNZpYqIIhidDgUEjXGT6FVK0OpRYhqhfBSWUQ0EqcpQTdFlLJUFViB/UDZhhTUVQhnHktQPm4aqFs51Sbd9jzJ7UJon7Cf8Fqp/Br3ReA6oEBbKfqe+dnCbGD6gYqqjD/0NFGoY7RWMzANq7ZtOKkPYR6WPviiKL2L5xRQA1QhydDH6/GvAeAXVkos6vZ/C+4tV+Y5tpjAS0uR5/mci31Jhd2hqoHto5YxoxwOoRc/o35S8T4tmHPKGsYb6AMklFb4pm19EE1YKV8kZ+IkTswdQImyjY1l7Dh1QAUMBuDVfNHh38D5dGWDa8gpPW14TH1vPlV4xRQN6wTT0EW1ogoVRRtsBmqM85nDuyMteYOww9AlzXWkLlCfuw3tB1jbx83pebQL9aA3a065VxVMC5NNJQGtrVFwYb3TAU962rGsxSKW9lYLJVaytRMmqyD409m3HoSHuBfU4YGP2SMyyaTEMUrNYbzbX8DgNnCKCqGtlA/3vRKU2kekw4NOUPw2RA7bk738SqtRhMj3TyL2c6mrOnH8USxmdM4zmSo3EzUqtSMIv0BPYagPJrax8RjLOgP0PTsrkZ4nIz39qXqqPxxC82iePiTA3QRHEExLAolRSjZBzqQkihcFqe4BCFzh5m/h9E4UIgK7NLPhsIWmUMg9EXqnEW4axWVxuVTQx4Ht4cooGSOe2JKK6NhJRDHlCE1la7Qr4YMmkupAXA47XXMWeBGKpZhZDmFXTZh9u/TaD7PzLLI/sI4ViSHwb/yvOiebKC0Do+Rqn3sLn58CjX7xAJt2Aj6g41OaKDqEefold2mjOzxI+N+ecoUoVJ4X2v0CZjv9Vzde/MO+cEftqCY9clAalVNA3W0AuzZXGdDb5OHa5Cv+tIfRGo5pbFhpDK4bSHYzP+3oL6LO1PAuSczDTCqY6w6c00ZLTn9Blro7zGZo/IFcrLsHsmH6VvYZzG7LwpRA838Gap4B29/gJkMxcVNRfvHhR03g9ckb46OyeZ1owJ2QCRifoF8sTb6nH0mN5VdJpJQHezSwMY7835+bVHGmGUXz+H2EUOVljSSzDO7XdMrAjxY/sT3xFdbVJ9hbvhNqUz7XZwtzIjwxyrrxLKzZGR8NqVaRUKUDZ3lpTqQSiTYBS3D54rlYSWqX0S+MfpRlamvksUyc3X8AP9Gbqy/Jz+tJay6WLEsurWKKU+SlliOfYFpcRkpeLxVGhB3M3R6xloIq8mujA70d2BENam1phltiRU7YI11sNaewn0IxptIt5phDvreTGnnMz9Hg10Ms0SAhMphNF8w93ZcRxwsLIC5geDWck2KRIWO3Iiq6jotoH+iTpfe0qPZivfy63uQ+AvHJpvThxljzTWuRkwTUQ9EtBlThwzcYMtuRgHMVhWsgpuatUT79In/XZjc/Porb7KhJID3/zk5WsNLTWX8zYbaKCFm8BxRhn9HKTi73OI5IKrv+6WJFNzUfUjWGOQFeWMQC/lakoOcONO90/a12J0q71cBygkXiiDIU94clmPexOQCiVWAJJeCxI0DTRN8UJEcPbcOm9adC2D6A6zPIMAIuERXzEBfZKuNcN8v8hvRJEtcsvRwvjaaRwaEInX/MDcMcJr9av0RmI1h90R8K4x+U84fNUit2S7ae4cyQ+rSI+UzFKjt0sMvTltRQ/R1ZQ0M2XyWnWXKvVqowE1WrhGl8tfLRKKF3iLq0yCp/tcRfGvr0hyMK6TvG5eJXXdLkLl/gctMi6yedCz28mF6oipIlczGFtPXqorWtEKhtBZuL002fiWjUgyx3Hc+kQqDSI1hwgWgmIW6g8R1dmntBStkw4qkMBRVorf8bYjFpyqglXs+oeSlptLS+jbfZc2JEz6B7OJ9XXXFtGXazNnRWl9d2me+oK1Itc5zmQ1FIzl7sKZaGXWfISysJzrissr8QOy5JwHCw9twLNZ12PAj+WxVpND2cXKBzPtFWZci2Zde9qNk5dpXPSMAC2KkcSug2et6YMd2KKJxG8qP71rhF5+A+GpFU19aV3ckRHwKX6uUm+378uWa1LaWcMjY62UM7CNNPqYTfhd1DHoLee4XNN+Ji5g9Af1apMBTzpjywaVEjIOGERPuZ9cry1UJkcJGg1ra7VZvDJO8PP4BUMaQ2L9zlvcUt2fF3htGmio6XZfl7iJlTkaAwesQZAfTg1SIYq55Eyla6ffs+YwR+VRzzLcpS03mqg+dmUtD69Oyr9XP1UtE4K08aA/O1oYA4qyztDfi2NT0dlem7c5n5vY/ZJ6AxxMsQEMWUWlppjO3wG4ESY+zQnGWo09jdmv78gfc59ckJSeTzKXGchkcbm5w9KV5123GeOI0NV8WTLTc6nPnx8qaL3eIyNBpDJYhOvt0nSmoq05WJSW2argr9aLLeWT2oarWLS6lTgzSJSkITrG8ZyNrG9qkhciROr8Fe0e3Um/NstNfj8TEI9GUVo6Bvv69qIP70pPw00HDEWZaOZMLaxjWXhJ8/0ZoxQIqgzxCipVHsiPeB0EzcqU/LLVmjoBEqHVPq/xiYEtNfKJq2+QspBhYVtOAjnR3gQB8L4EW6ag+dSFzttjHBE2BrVuqU8Sj+vmjxK9CG+dVHbqwIvb6LG2FrlaqO2XlQr61obGXoTrfcyIG0SCARpRQFkldY76toLhLFcLhqV2hHwYmzBFIUIO5Io4YP98UPjI+2zSCc1Icms7mERAjjgc0BEAkYEKd6rMXWIbFM9RDK6j+g9PrUn1B+rJYyrq6EB4CYfsAP+sLyc6HpmpUi1TX4LRwxD74+rV+qxfj6VB3y4aNW1wWdBPZ7y71w74mF+dahkTumadv558UoY+p70dHgn0irMQBjCi2o6Q5xjz1a0xU8YT5+shgYJP4Ec9z7JuDzIh5Fr8LPOzymuEzrJ5KBZx0Jj28H92+vxOzmhee8YPwWga+IZ/aGrM3pviVHyBQPVyXHi7g9+dmq9kgaFi/TYHU7ZiBGmN+lP25Mvrygo25Ufx++KY9Tl0ZSqTbTEJIcIVvW15Fi197z+ME7RrlhvY76dxVZgDs9m2l2s3hic7CZGSDtTdxRTQzEr7QjE/TQj78qt43Y1JPntm2153wNGzVzhlj/cOW1HtACXuV2IO1sJGO28pqaYwZBF+Uz0iQfbpj45HiqQ8AXPCkqly0hOk2JBmgP1CffyhGZxmmB+wzIHskso4U2I7UzQKM+DYLbB3nxPZj0ulOMb7rNdw5dD26UvjQZ/wQ+r7UbJ5vH0hUCqoO/4Qo0cNdZTtFfPgqk4lGZkh0Zy64ckbJ5OoNA0JnLmafGdQDGCaXB4o4K2lbtPYmPevdan9re4ESB/eeGsm6xzO5ChSTKigjdIagKS1eXDZ3jY1HJTfQ8innKC+/johr7rKDD7UScMvb6Nl1ZhatVFAxWnEj1m87ck7YoN4J9xL7fUuuMNONzm5oT/I45MTSyuJNu6MdD2RRsN7pG67BtVWbHLUBbOk0JqsyI86iqtFSqxx5NxPiuvgWZkvlqamTIxDw5PXhKEF68PlWxjv6rcxj6ir0WDFF2KRJ+1zFUhoNKkXr/COwVwj8z5wvu97a+6e+9b3+zu7XfeHZx9s93Z+fL1ydG7t7vf7BwdHJ3wHSQN8Vc8ERREjLyiZ0appCtAGLtcUOAPn72oCavy8XvQcDoOk7CjwqRM7ViYY2riYWCBBxZVx7J0qK3YvbF4NFIna6xtlGWSRwkQ34fnkluH6LR9PHGAztif6QIBOipJ6CZWrfx0onnOdKKd9V330rsAAuf3qdR0vYjPDHp6XnyrT6pI/72xLZZys1TFJ9HFCE/E5vkn8tJq1dWE+b/8tWwoi+rJNWz/S9xb9gNeZnL//cOv7/9Ve/jb+99D0m/xX+XFbD/Qta541dkPkEsepqvTLW2/y97x+jTUehPbiRZtV6N7OTAi1/N9GH3eKK5x0+OzGK2aod3/IwKjuv8JK+I3ycobZCHDLotM2wnlpbFlR4SnryL6vJfJxlOo9Oo90phnDS0qkW53SgccqoyvJ2ZgzXkiTosOvcgbgzE0xUEgt6mv8gwBfiw3aq018d2V1A5i85KZDj8RsLye8kMZqmj7Vh3iPXxER6wqO4IsxdKOGGY6IYMov1/x9PDoyz3trHu4d/TujO49SqnIrfTZC6X1qjvm7j/pMSyxjv/+9JvTr08P996+Q2PhGvqeDmCp44fD7tvuYfdne9tHP5UfW8nHzk/zH9EaaKgPfeF68Rdb2n9NKqzK+d1WHoHvcpU++mSYykHivnzXwvMLdToxmfMcbVxucKQ68/Cb5MRR0Su4HAzpu8fdnTedt6/3dnl6a6+hmGNj4zAcohMyCwlEC8wcGs38eQkFAlHPRLpfRZzeXjgUtXZoBuHIdAyASm6XSZ/OTh4bB1QnBpr4zBuUA1Ce7wAdEtHmDd8IGqg3qi4oQGJN97fSv/XvhL1PGx8aJYvl8t4oM6LDJZGhpZJw/6A9BvXcqpXtk0LgAqfCYc/Lyyg6y76+UEb9yW5Gjk9KOlShyCa7K+6pMw9PmvXrWtJj8c2++cJjg1/vWXnsSzIXN6beKJCm+GSOzCZeghRZ4HG+81IClSmPn6RlUF1OPOhZaPFqG3TQL2AC78NfTWmeypZB8Zd4qsVtbNO64can23AqDUW0J3MYuzwTJnMaSyACx/DSNx9/ZLxd8oEfwUxJlIc4e5ufzQUc/i9OFNUcYSb+Df3wlR3i8UV4r4NOPiR+5H/lMSSUhdT42L03290uT7oh7+0dec83f+CJuvp8IqxrS3m1l6pDck0qXGBQPChKqnuZJhcbnb21mlovnNeJSYepIhGPB9uUd7uLYxFnm6xXph3NqQrG+7Cbci7o2ZoxTCbGi0csNxo1dZgD1q9UHumD1B3pJXUWbkppLoOpVgxnJfeY1NRWqThWLneJMD+wjinV9FkGNL6cPD5aLgdIpUIfH3RO3/BTzPKV4GKMd8G/JQOiXsI5XwjFko3ruXgHaTUZp03x+ACWuduZ6PfZo1am85IjNzO1dbqCsRMMQ62Cm9CUzZdkqtF6klo+oPP9ktfYcFO6Qkw8c1ojh4hm0tzqQtH3rKfXFEJiprvgQOMhZ2BzQwoU9Q0nUrK0xCliHu73KdOhyC/GjayZgGK0JgIN+D6ldtnJYdyvOFeIgdkPbnC1AZf4Z0RmjSMjSpagIzncWEYFCNjJ9QrkUcVzZsVFB+KZ62r4JITuFoWPlFSRYFx+4YtEnOTm8C9ykZ11NZ5yf91cGkkj/X8yIoWq0WjJB6l8tBqlrIKbYCLuahtm7xCF64/PF7jLkFMFz3SFd0Hx27CN/ijwxiTyMwnGFetd2uxK+FOgxHffxTnCjIPTYRjJ+QseBcMr8JPb5g9Neenv1aVhWhYxj/jC4adj3ntPQbpJYcRBICUwwzIjk6Mw5hbgN98EzHdu0jwPKzNGZqjHXyl2m5KHLEolw6PQGvhXiw7KS2UgvxDHlmMBCidKYb0/homIyBCO4jZHEBvAjQI8FiuFuI0tf/YMekTUEgIONl0+hLunoBeAL0fyLh1+lJ8BE9keuvqtRhUBiDteHfb67R1xM9GJcgigEjHPRwBuXXsqBqz1VERZQc51Tb8amRGhl6uXasJStgt9j7mgBlHSBw2B3yy/jjqHTSfKIwzsDf1p8hlKcnYNGdblA6L89GkCDb3vAhFoUxUumFMgU9e863WNtC7L8K7h9SZ5vUmAQ5+C6QDgmTVkVbB5RoCOGVPlJy7Mz4kPEMQlbuUQRNanfMeyhIGs6q6GJL6QcYZy4YRnSidS6ZMuEREze2INKu6clGs6+ZPF0jzai3dRPuY+OHGbJt6OvWjZIS5bwS8Gbi725alWnrt4CdqDt4h6hGPehOqr/xAZ5l5SHz3ubjquV/C7J5Ad1LF76tTC0qsgcUkeQ/O5xoCVGycTVzBJuQKU3JHcXiF9uuz+R4I2/11/f374FV8zEMsT97+dstRR2YNxa0RvKnLy77hit+eGk4Cle5T3H5Qtq6KPmjmWTZdSuS6vUNrhqWahAbJYrA2KK30OmTsJ+V1BVonVp4RxeQajNmfBbvgzzxuL5cN5i/K7krfNYG5kxfWInX4fBAvdSv8lu5kb9WPb7Y8Q/+kF+ahCcdwY2Q9sPzrzxN3AR+6u15/gLBHKNx9lrhioBlrwF9Tb8fLrOGrEgDc1zm/NS3tIRE7qOpbO2ZU0RRhAsLmJGOJx47qooi52y9JJy4Edeq5xFFh41G536AKh7UA2kOQw+/H+Hie2Be5KsGHiKhpxk3fuDnjAhhlc/bKmgQISF9z/hPUZKHEE6shN0qd1CLYJdQsqKOwU9W30U05tmWElq7zwLEuxFYvGyrXqGTcpCmoKYtYE3SMokxMqJ0fQpQWVGpEdObjM+vS7EK+43noKz0+exJ9hTIMbfiyyB3qjQZme1qhAP6TcOndtptVU/EpmEmWIgfU868agKEHURA28B8m0Qag9pbyLXvi0Vn1bbZmDgNbYjr7kxkHwiAMzKiyQ0vr2O92D6eZI4cCHOT1RKyVLkjG1JJ4ls671xJyLFGe7VwIpdyWV9Npd5VxkktsgfciYlPOFV5womknk7CMumZ2qsqVtRqEExnajqoVzjnARwJSgjdSCb7tMocnyjEKERhyb8X9BlXn41f3vQJn5EwVA/B2GXvzy/o8Pf/Pwa1Bl8PX+jxgcoYjSkJESO97EsdynEWhszNUiHpUh5q+MnUha/LljJNSxEXfVHmUwE/muD7DTPDLeZvGr55Wn5CZ0pYNUcM+fh3Fk2k/MS5MzTjzxGDTMbzHi14hfaFPhrk2eMTO42eQQJIo4E2+h94Sdi13HbUxMJPQxiTvkYws4G+iVxh7jCqNEGHbCnwCiOmJbm3I2tWgYCH69AlnoWpHxAhmf7Ob4MHfLOAtu4ssKL/iOiEu6zP0y5ZAt3HB4iftB8KPqUHccVGB3j8KLu2Qfix3UutziyDXS7tnUNYoKUkyrI7pAJaSNIvWZbamiojOTb7eii8bK6NpxNRXvslC+bpbDfqkzI090ZbeR3JZdkBJe2cTIkQLHyFDAuJ/pMsY+iBHIDrzpfGFdLZwEbZAzZUuLa8D3cm2CuAOVwADrMYKvaZl19eKyOq6f4rJ6CUg64SsH17wuwp119R6INf/tLe7YcMTOCmWh2XHD2ERcBFE6+YlHl25dA8tGZeyKsUocVaVDxjk5X7Tlo2VbFBslxlL6tFLDKZLKR7Q8bFOKD+AjHK9jwJAFBv7ErmEBPxUG+X+4nEV/wA8P/42k6PcPf89l7B9B+v4BBOyvuUB9P2IB0yJPC81LRlt/0fdS0169ElrOI7sSXXPlnThIzSdB7XxoQ1Tm8I20Ooy61eOO9q4p7DF5v1FoYQWyUdcDbA+fk30rFTbzDK3lzsLS9tIAn1CeBB/0K1Y0YFqNwrlYWueJyJBUiE7IOSusVG3SrRLUT07VSr0mzUKebJWwiRIlB+cerQORS5bGEUwFhw1wP9srrbkM7CXzKeA3KOC3Nl7ckndByZAWfgvPjulT5Etto2RZJrnQXk49XGHpNOta6vLpUVTLrNZMCTiQo5S+o/xzeH0HE1qHILcvqBb7E3FECnmi5eQud+pEdOtDobRMOGNjXxz7VWYWIAJpH06E927N4L/B1YAnccW2w+gqZIRWS4NLK/ZiIswOHsEaYNuEUcghz74mmrbQ5BzElcNJyCxhqlUdTzrPJcTyZmhu4IolJEyhhK478Ah5nNqLixO64Qp52q32LmSn6OwQ7hPhAqprYktPfGoCfoBxvlMhO7NonX8xNFlCqXRBFCdLIhNo2f2a38Dq3ZRPGL5ZEFevc/ubNqo50xyhibflJ1SzTDxO+soijM3huWretYxT05YywTu0jUgtf6u1Pc5DS0IL3Ov41s++8VOMWGO4959XBowMiaJvfA0fRCCdRNm7wd3vtTiobkPlvVDsjXKvEeoUqkm2c2bKcgx5kB1H6szza4rNOsfJVXP8wD5epiQ331OKl5bwooossVKgCC+K98XSYZQq55Pcg6oIhE22FhX9VkWKl9uO8ubaTEYXbYd1KUgqQVlcl3toO44dittyc5c58QPhovQuPTwiwaXQMdm0iiZDxvw2Kb5HmG+UUStadEdn3PGzhRDqYr3GOPSA/QqHjvaFln6lEE1S+iiqVKHwpRATPv5ibaRN3lawkyxdpQiRk3BC38ZPJSmn0r6uvEA+6R7Cc3rfzMr1ZtkX2q/aCRrv54IGbW4lGx2bsqvPMpd1TjFSY0OwzBS/UxHqReZ+nvTVdRZeXiQ2bNdm4hoikQ440JMRjYeQvtX4sV/y/etc3q9Teb9W3itCswGGPeILS09SNPnFFxz/Ti+sqH+TzpYqy5xDgGfeUMjFfdoiIBF5lSbh9RLWiMsArp/h0SQmUte++oChiDzNpH5dU4XyATCwAqTgqGVEiK8K1OTY1orUNWe48xHtaSWNxtKTxxkjFfk6Z6HmVBhjCjqrOnlC+BL5ARRpG79w+sSHHTxwyPcCEGyvJ7YFmtTuTnNnpfNiZ3Fvba2z2LYstthZ6TQXVxv7a61Oq9HZ238OKuHHVMwXrwf03yOfubu26XjDk533fKNeZV3t1mBtpbm8umj1nrPF9vKL/uLayqC5yNqN5ytWc3ll0F+T9jkLBmafnd34TEdA6QQjfuuG3XfuhYuLlSkEbflZ6yKWHMPSkfhwHDDah3lqDz+SfkNrDuLq3uTCswwNi2h3BI8YhfqE2GX8Ls03LRhCGqBz6rP+NChdEMzXHJIt05RlXufLoLOXyvnVBTvWJYaPybYNLMYdxbysdbXjeRe2uug71+SFKW9lVmiSDNihzAMvLGuGzJcgUZYZgIrQDk7hepfsk27Expof2qV9O3Pm13FmRCZdoKIECEekD75EjPE2s5Y9TRmmH8T2mU6ov3PHpgtmjEV0fnD8HszR2kdpUfvht1igiiZmBIhozgAUsDzDFfK5UKQSpYRxwZWqA7PHnPnAsutoWlfOD5VKlHUo310z85h2LOvYAbaTozZuYg4s059C2BReHCIVzdOCfGFlJXzVkZxfQRkWPJyZWDWGMeODNoR/SgAyM+Alds3I1CtGJsL5JzgOfy2VtCqZsbzWWt1t7i3uPW+uLbZbe3uL2zsrK4ud5l5rtbmz/Hx7f+/zyox48MrvNCXXJeidZx734iUN7PV5EDj1Xm/EQ3DFa2DT+u0kksLB9y/LSO+Y5M48rAj3XjjmDTEAYqWhPbRcfK1r8zGEKWwmdXgbr2cwNL1DM7xIyxJK5DnV/Jx72IpzhYqPbDxPDKFxoXaEB/qUU80uACCqAXqhEJ3llmE5DrrzdkZmcEoGlXgy3rk2nq1Q11JyXxpyaYoQWhVwHRa4gp7f8LA2xJbMG+hV6DHq8mRCouMxlv9EEB+67sc8GXw4mkR1rWxcYmoVQ5OhgUvlBb7ZxW5a3RE4AKmjwZ9dXYrfKQTq0/zFqNJbdCyxntK4anQ6XV5NVF8559BRyVIbaFy3GrT3oM1/1hqNilJcQkUqqZPyRpOXBQ+35M1XbSobAa4Y/EYFjG74duI4R8He2I9udCpOy+lPkhNkhfuXf6vFVUjPc5xREAjmKnN1V1Q6u2O5NHauIm6Os3k6NZy26CaUVjNev+vuVsRNpYjShn8qclZPHBPZfXa7LMyVoWAAiEkFaEEEQnWryl0SmlZyykhJCXKiYJVoI9DEqtEpNPG14hTpUSyX6itgOyXEnFU5aOtGKT3jCoFy62No5IQBzZ+VNTo/AuGWrS2IBigAf+6wtLSNuj5LiFn65MtefO4lAhHRz5y9wCjuspBCPbj9T0yhrnH1nFnH/BJBub4ulrBKrymSF8X3aLR5FTr5AQU3o7Eyjr7UXlGmdC3rKkK4U9nw8H+QU6mlKKMf+oH384V1bWHzGB7QaXtqXWydLyQRNm/3zgxIO1+gwF7M5rMgunkdeBNfxPpugoDxJxGKk5fvbXfvmm0upZJEJu6soS1tV15w8dJlUXttcymfLHIfmO7wKxagmvnyubG8uZROEHk6YcjGPYdo72XSqs2lzAeR+cTzInwPfZB1qdwd399cyn4UJUDDjvAiDI7hy+vV9uZSLk0ikpydhyF5LzEw4ZuQdzGoAIBQLkOx3KHp2gMWRi9N3zfG4iVTMM4hOx1IDz2QL9EPDB0uX8XnXdabDKn/cRPu5lLyLjLQjU20vYR3Fi7RCVjKT7JXAs+a9KNMf8u03LiQuFQODP8ispN+5t5kMso0keUUkHEcmNIwEbxJ0GdIDROYwuFL5m4uVXxOepqBEp2ltTOPUylOo5eklVGHT8lI02CpOA82keVmpsWx2b+g2LMBAxUbFX6370wslplf6Qg24BCCxCFL02gYrReNZaPdgHQ5JIiCrBsy4XjB16W5qoQpHTfNiLOKsbFZWEBjGVKOA9qQjrmiENJN1HqTilU1qkKvZywjztGdtQbc9yOt0lmr6B7hDjMfxBiWelQhPDWQ8S9x+c2lLB3kyKLwWclQ31+2Duzey7/Sjy+G8bh9A838RpJK7fzcsXvn58hFV1ubS6JEpjzGYFq0lAINeCJUyKd/pfOvAKEqjtLC7QfA9WfEYUWFgmeC3JwCIZi4wLiA6M5hwBeByQI8CmE5P5e5OBzEiFfCwebrqWotZajN0B48L89KMCB0pqNRzQ4yiD2tqv8pKnhPnwpZCzD2xj1mWcySfC1FkLMPI5AmqEQgRRwUcaXMJ51/6bMgEB/FOQcSuTKzI8KHuFBNcfDKZ6pYThIld0asfyGL40RHxrLNQPoznhG5IFj26FsAlLeJcpKRw6j8zzEB6XTiVEM0YbyDGu+Emuuh0xvPX7BdLQGc7rhpiCRzI19V0mdJPetarrvjiuQxatw/gnvaANTIHo6KgNcTVLUNNUCpGMILzS4Kkeb6a1pDItX11fXY0S7TEgsPjnf7ngUiBBIm0WBx7XzhFcIyhQaiSQhf5coBLBdHFvTx9bA/YmMzXBzLYcI9wOtmODYum1IhlgC7FgNGFt1kEcH/AVBXkFSieUMjzhdEU0GIhxQhNWvlrYTOQtafgK1zE2+72wzk/kCU2EC2oAXNCnc5hpuFxEOzoFEH7JI5moP/ogoQ8pCrAFo4sXFbaIiVkCaVogwcTAVSsgVLmSZsLsW9wd9x1zVw457tYOdOb0gmfzJOOFKJLp1gFk58JFdmHZ1qXQsg366xxuC52Wwt9ga95cX2gK0t9l6YK4vttYG10jCbK+YL8y5N+Et5wJtLGSR4msVQsQSqjJVamRJJrTjBqkBU6DLZovD85VZCTyn2IXQsUE7GnrsoTxaGrAk5rsbk6PPIPC/oACnauOI8CRDej/Ab+fi+ZDdnMLJUbOXFSm+13Wy3+/1B0xpAHkeo16JI0hPqJiXp1HjosOTrwt2/AXRj1Rw="
+HOST_B64 = "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"
 
 def unpack_sources(b64, folder):
     import zlib

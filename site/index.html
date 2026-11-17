@@ -399,6 +399,7 @@ footer a { color: var(--muted); }
 .vdl .go svg, .vodc .pbtn svg { width: 18px; height: 18px; flex: none; }
 .vdl .rs-scale { margin-bottom: 4px; }
 .vdl .vlocks .lockbtn { height: auto; min-height: 34px; padding: 6px 13px; font-size: 13.5px; text-align: left; line-height: 1.3; }
+.rhead { scroll-margin-top: 14px; }
 </style>
 <script type="application/ld+json">
 {"@context":"https://schema.org","@type":"SoftwareApplication","name":"ClipSearch","operatingSystem":"Windows 10, Windows 11, macOS 11","applicationCategory":"MultimediaApplication","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"url":"https://clip-search.com/","downloadUrl":"https://github.com/clipsearch-app/ClipSearch/releases/latest/download/ClipSearchSetup.exe"}
@@ -997,6 +998,7 @@ footer a { color: var(--muted); }
       $("rstatus").textContent = st;
       $("lockbar").hidden = !n;
       render(true);
+      reveal($("rhead"));
     } catch (e) {
       $("rhead").hidden = true; $("list").innerHTML = ""; alertMsg(e.message || String(e));
     } finally {
@@ -1030,6 +1032,14 @@ footer a { color: var(--muted); }
     </article>`;
   }
   function dlUrl(r, q) { return `${API}/web/download?slug=${encodeURIComponent(r.id)}&q=${q}&name=${encodeURIComponent(r.title.slice(0, 70))}&lang=${LANG}`; }
+  function reveal(el) {
+    try {
+      if (!el || el.hidden) return;
+      const r = el.getBoundingClientRect();
+      if (r.top >= 0 && r.top < innerHeight * 0.55) return;
+      el.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" });
+    } catch (e) {}
+  }
   function render(reset) {
     const list = $("list");
     if (reset) { S.shown = 0; list.innerHTML = ""; }
@@ -1216,6 +1226,7 @@ footer a { color: var(--muted); }
       list.insertAdjacentHTML("beforeend", items.map((v, i) => vodRow(v, start + i)).join(""));
       if (!n) list.innerHTML = `<div class="empty">${VIC.film.replace('class="i"', 'class="i big"')}<h3>${esc(T("Записей нет", "No videos"))}</h3><p>${esc($("vstatus").textContent)}</p></div>`;
       $("vmore").hidden = !V.after;
+      if (!more) reveal($("vhead"));
     } catch (e) {
       if (!more) { $("vhead").hidden = true; list.innerHTML = ""; }
       alertMsg(e.message || String(e));
