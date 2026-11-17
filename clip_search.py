@@ -46,16 +46,14 @@ def L(ru, en):
     return en if LANG["code"] == "en" else ru
 
 
-RELEASE_NOTES = """- Исправлен чат в записях трансляций: раньше он замирал на первых секундах, теперь двигается по ходу всего видео.
-- Программа открывается с первого раза. Если она уже запускается или ещё закрывается, повторное нажатие просто покажет окно.
-- 2K: клипы и записи со стримов в 2K (1440p) теперь можно скачать в 2K. Вариант появляется, только если 2K у видео действительно есть, а на таких клипах стоит значок «2K».
-- Раньше записи стримеров, которые ведут эфиры в 2K, скачивались максимум в 720p. Теперь доступно исходное качество.
+RELEASE_NOTES = """- Чат в записях трансляций больше не замирает — он идёт по ходу всего видео.
+- Программа открывается с первого раза.
+- Клипы и записи со стримов в 2K можно скачать в 2K. На таких клипах стоит значок «2K».
 
 <!-- en -->
-- Fixed the chat in broadcast videos: it used to freeze on the first seconds, now it moves along the whole video.
-- The app opens on the first try. If it is still starting or closing, clicking again just shows the window.
-- 2K: clips and videos from 2K (1440p) streams can now be downloaded in 2K. The option appears only when the video really has 2K, and such clips get a “2K” badge.
-- Videos of streamers who broadcast in 2K used to download at 720p at most. Now the original quality is available.
+- The chat in broadcast videos no longer freezes — it runs along the whole video.
+- The app opens on the first try.
+- Clips and videos from 2K streams can be downloaded in 2K. Such clips have a “2K” badge.
 """
 GITHUB_API = os.environ.get("CLIPS_GITHUB_API", "https://api.github.com")
 
